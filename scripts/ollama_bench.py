@@ -18,6 +18,9 @@ import json
 import math
 import os
 import platform
+import re
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -26,9 +29,83 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
+_VENV_ENV = "OLLAMA_BENCH_IN_VENV"
+_NO_VENV_ENV = "OLLAMA_BENCH_NO_VENV"
+_VENV_DIR_ENV = "OLLAMA_BENCH_VENV_DIR"
+
+
+def _repo_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _running_in_virtualenv() -> bool:
+    return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+
+
+def _virtualenv_path() -> Optional[str]:
+    return os.environ.get("VIRTUAL_ENV") or (sys.prefix if _running_in_virtualenv() else None)
+
+
+def _venv_python(venv_dir: str) -> str:
+    if os.name == "nt":
+        return os.path.join(venv_dir, "Scripts", "python.exe")
+    return os.path.join(venv_dir, "bin", "python")
+
+
+def _bootstrap_venv_if_needed(argv: List[str]) -> None:
+    if "--no-venv" in argv:
+        return
+    if os.environ.get(_NO_VENV_ENV) == "1":
+        return
+    if os.environ.get(_VENV_ENV) == "1" or _running_in_virtualenv():
+        return
+
+    venv_dir = os.environ.get(_VENV_DIR_ENV) or os.path.join(_repo_root(), ".venv")
+    python_path = _venv_python(venv_dir)
+    if not os.path.exists(python_path):
+        sys.stderr.write(f"Creating virtual environment: {venv_dir}\n")
+        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+
+    env = os.environ.copy()
+    env[_VENV_ENV] = "1"
+    env["VIRTUAL_ENV"] = venv_dir
+    cmd = [python_path, os.path.abspath(__file__), *argv]
+    try:
+        raise SystemExit(subprocess.call(cmd, env=env))
+    except KeyboardInterrupt:
+        sys.stderr.write("\nInterrupted.\n")
+        raise SystemExit(130)
+
+
 def _iso_now_local() -> str:
     # Include offset when available; keep it readable in reports.
     return _dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def _log(message: str) -> None:
+    ts = _dt.datetime.now().strftime("%H:%M:%S")
+    sys.stdout.write(f"[{ts}] {message}\n")
+    sys.stdout.flush()
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    whole = int(seconds)
+    ms = int(round((seconds - whole) * 1000))
+    h, rem = divmod(whole, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}.{ms:03d}s"
+    if m:
+        return f"{m}m {s}.{ms:03d}s"
+    return f"{s}.{ms:03d}s"
+
+
+def _slugify_path_part(value: Any, fallback: str = "unknown-machine") -> str:
+    raw = str(value or "").strip().lower()
+    slug = re.sub(r"[^a-z0-9._-]+", "-", raw)
+    slug = slug.strip(".-_")
+    return slug or fallback
 
 
 def _ensure_dir(path: str) -> None:
@@ -123,9 +200,431 @@ def _fmt_int(x: Optional[int]) -> str:
     return str(int(x))
 
 
+def _fmt_maybe(x: Any) -> str:
+    if x is None or x == "":
+        return "-"
+    return str(x)
+
+
+def _fmt_bytes(x: Optional[float]) -> str:
+    if x is None:
+        return "-"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(x)
+    i = 0
+    while value >= 1024 and i < len(units) - 1:
+        value /= 1024
+        i += 1
+    return f"{value:.2f} {units[i]}"
+
+
 def _md_escape(s: str) -> str:
     # Minimal; mainly protect table pipes.
     return s.replace("|", "\\|")
+
+
+def _run_command(args: List[str], timeout_s: float = 5.0) -> Optional[str]:
+    try:
+        p = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except Exception:
+        return None
+    if p.returncode != 0:
+        return None
+    return p.stdout.strip()
+
+
+def _get_windows_wmic_value(args: List[str], field: str) -> Optional[str]:
+    if platform.system().lower() != "windows":
+        return None
+    out = _run_command(["wmic", *args, "get", field, "/value"])
+    if not out:
+        return None
+    prefix = f"{field}="
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith(prefix):
+            value = line[len(prefix) :].strip()
+            return value or None
+    return None
+
+
+def _get_windows_wmic_list(args: List[str], field: str) -> List[str]:
+    if platform.system().lower() != "windows":
+        return []
+    out = _run_command(["wmic", *args, "get", field, "/value"])
+    if not out:
+        return []
+    prefix = f"{field}="
+    values: List[str] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith(prefix):
+            value = line[len(prefix) :].strip()
+            if value:
+                values.append(value)
+    return sorted(set(values))
+
+
+def _get_sysctl_value(name: str) -> Optional[str]:
+    out = _run_command(["sysctl", "-n", name])
+    return out.strip() if out else None
+
+
+def _read_first_existing(paths: List[str]) -> Optional[str]:
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                value = f.read().strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return None
+
+
+def _read_linux_meminfo() -> Dict[str, float]:
+    values: Dict[str, float] = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    key = parts[0].rstrip(":")
+                    try:
+                        values[key] = float(parts[1]) * 1024
+                    except ValueError:
+                        pass
+    except OSError:
+        pass
+    return values
+
+
+def _get_linux_cpu_name() -> Optional[str]:
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.lower().startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    out = _run_command(["lscpu"])
+    if out:
+        for line in out.splitlines():
+            if line.startswith("Model name:"):
+                return line.split(":", 1)[1].strip()
+    return None
+
+
+def _get_linux_vendor_model() -> Tuple[Optional[str], Optional[str]]:
+    manufacturer = _read_first_existing(
+        [
+            "/sys/devices/virtual/dmi/id/sys_vendor",
+            "/sys/class/dmi/id/sys_vendor",
+        ]
+    )
+    model = _read_first_existing(
+        [
+            "/sys/devices/virtual/dmi/id/product_name",
+            "/sys/class/dmi/id/product_name",
+        ]
+    )
+    return manufacturer, model
+
+
+def _get_macos_model() -> Optional[str]:
+    out = _run_command(["system_profiler", "SPHardwareDataType"], timeout_s=10.0)
+    if not out:
+        return None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Model Name:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _get_windows_gpu_names() -> List[str]:
+    return _get_windows_wmic_list(["path", "Win32_VideoController"], "Name")
+
+
+def _get_macos_gpu_names() -> List[str]:
+    out = _run_command(["system_profiler", "SPDisplaysDataType"], timeout_s=10.0)
+    if not out:
+        return []
+    names = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Chipset Model:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                names.append(value)
+    return sorted(set(names))
+
+
+def _get_macos_ram_used_bytes(total_bytes: Optional[float]) -> Optional[float]:
+    if total_bytes is None:
+        return None
+    out = _run_command(["vm_stat"])
+    if not out:
+        return None
+    page_size = 4096.0
+    values: Dict[str, float] = {}
+    for line in out.splitlines():
+        if "page size of" in line:
+            parts = line.replace(")", "").split()
+            for i, part in enumerate(parts):
+                if part == "of" and i + 1 < len(parts):
+                    try:
+                        page_size = float(parts[i + 1])
+                    except ValueError:
+                        pass
+        if ":" not in line:
+            continue
+        key, raw = line.split(":", 1)
+        raw = raw.strip().rstrip(".")
+        try:
+            values[key.strip()] = float(raw)
+        except ValueError:
+            pass
+
+    available_pages = (
+        values.get("Pages free", 0.0)
+        + values.get("Pages inactive", 0.0)
+        + values.get("Pages speculative", 0.0)
+    )
+    available_bytes = available_pages * page_size
+    return max(0.0, total_bytes - available_bytes)
+
+
+def _get_linux_gpu_names() -> List[str]:
+    out = _run_command(["lspci"], timeout_s=5.0)
+    if not out:
+        return []
+    names = []
+    for line in out.splitlines():
+        lower = line.lower()
+        if " vga compatible controller:" in lower or " 3d controller:" in lower or " display controller:" in lower:
+            names.append(line.split(":", 2)[-1].strip())
+    return sorted(set(names))
+
+
+def _get_gpu_names() -> List[str]:
+    system = platform.system().lower()
+    nvidia = [g.get("name") for g in _get_nvidia_gpu_stats() if g.get("name")]
+    if system == "windows":
+        return sorted(set([*nvidia, *_get_windows_gpu_names()]))
+    if system == "darwin":
+        return sorted(set([*nvidia, *_get_macos_gpu_names()]))
+    if system == "linux":
+        return sorted(set([*nvidia, *_get_linux_gpu_names()]))
+    return sorted(set(nvidia))
+
+
+def _get_pc_metadata() -> Dict[str, Any]:
+    system = platform.system().lower()
+    ram_bytes: Optional[float] = None
+    cores: Optional[int] = None
+    logical: Optional[int] = None
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    os_caption = platform.platform()
+    os_version = platform.version()
+    cpu = platform.processor()
+
+    if system == "windows":
+        ram_raw = _get_windows_wmic_value(["computersystem"], "TotalPhysicalMemory")
+        if ram_raw:
+            try:
+                ram_bytes = float(ram_raw)
+            except ValueError:
+                ram_bytes = None
+        for key, attr in [("NumberOfCores", "cores"), ("NumberOfLogicalProcessors", "logical")]:
+            raw = _get_windows_wmic_value(["cpu"], key)
+            if raw:
+                try:
+                    if attr == "cores":
+                        cores = int(raw)
+                    else:
+                        logical = int(raw)
+                except ValueError:
+                    pass
+        manufacturer = _get_windows_wmic_value(["computersystem"], "Manufacturer")
+        model = _get_windows_wmic_value(["computersystem"], "Model")
+        os_caption = _get_windows_wmic_value(["os"], "Caption") or os_caption
+        os_version = _get_windows_wmic_value(["os"], "Version") or os_version
+        cpu = _get_windows_wmic_value(["cpu"], "Name") or cpu
+    elif system == "darwin":
+        ram_raw = _get_sysctl_value("hw.memsize")
+        if ram_raw:
+            try:
+                ram_bytes = float(ram_raw)
+            except ValueError:
+                pass
+        cores_raw = _get_sysctl_value("hw.physicalcpu")
+        logical_raw = _get_sysctl_value("hw.logicalcpu")
+        try:
+            cores = int(cores_raw) if cores_raw else None
+            logical = int(logical_raw) if logical_raw else None
+        except ValueError:
+            pass
+        manufacturer = "Apple"
+        model = _get_macos_model()
+        cpu = _get_sysctl_value("machdep.cpu.brand_string") or cpu
+        os_caption = f"macOS {platform.mac_ver()[0]}".strip()
+    elif system == "linux":
+        meminfo = _read_linux_meminfo()
+        ram_bytes = meminfo.get("MemTotal")
+        cores = os.cpu_count()
+        logical = os.cpu_count()
+        manufacturer, model = _get_linux_vendor_model()
+        cpu = _get_linux_cpu_name() or cpu
+
+    return {
+        "computer_name": platform.node() or os.environ.get("COMPUTERNAME"),
+        "user_name": os.environ.get("USERNAME") or os.environ.get("USER"),
+        "manufacturer": manufacturer,
+        "model": model,
+        "os_caption": os_caption,
+        "os_version": os_version,
+        "cpu": cpu,
+        "cpu_cores": cores,
+        "cpu_logical_processors": logical or os.cpu_count(),
+        "ram_bytes": ram_bytes,
+        "gpus": _get_gpu_names(),
+    }
+
+
+def _get_nvidia_gpu_stats() -> List[Dict[str, Any]]:
+    if shutil.which("nvidia-smi") is None:
+        return []
+    out = _run_command(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,name,driver_version,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    if not out:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 8:
+            continue
+        try:
+            rows.append(
+                {
+                    "index": parts[0],
+                    "name": parts[1],
+                    "driver_version": parts[2],
+                    "vram_total_mb": float(parts[3]),
+                    "vram_used_mb": float(parts[4]),
+                    "gpu_util_percent": float(parts[5]),
+                    "temperature_c": float(parts[6]),
+                    "power_w": float(parts[7]) if parts[7].replace(".", "", 1).isdigit() else None,
+                }
+            )
+        except ValueError:
+            continue
+    return rows
+
+
+def _get_resource_snapshot(stage: str) -> Dict[str, Any]:
+    system = platform.system().lower()
+    cpu_load: Optional[float] = None
+    ram_total: Optional[float] = None
+    ram_used: Optional[float] = None
+
+    if system == "windows":
+        cpu_raw = _get_windows_wmic_value(["cpu"], "LoadPercentage")
+        if cpu_raw:
+            try:
+                cpu_load = float(cpu_raw)
+            except ValueError:
+                cpu_load = None
+
+        total_kb = _get_windows_wmic_value(["os"], "TotalVisibleMemorySize")
+        free_kb = _get_windows_wmic_value(["os"], "FreePhysicalMemory")
+        try:
+            if total_kb:
+                ram_total = float(total_kb) * 1024
+            if free_kb and ram_total is not None:
+                ram_used = ram_total - (float(free_kb) * 1024)
+        except ValueError:
+            ram_total = None
+            ram_used = None
+    elif system == "linux":
+        try:
+            load1 = os.getloadavg()[0]
+            cpu_count = os.cpu_count() or 1
+            cpu_load = min(100.0, (load1 / cpu_count) * 100.0)
+        except OSError:
+            cpu_load = None
+        meminfo = _read_linux_meminfo()
+        ram_total = meminfo.get("MemTotal")
+        available = meminfo.get("MemAvailable")
+        if ram_total is not None and available is not None:
+            ram_used = ram_total - available
+    elif system == "darwin":
+        try:
+            load1 = os.getloadavg()[0]
+            cpu_count = os.cpu_count() or 1
+            cpu_load = min(100.0, (load1 / cpu_count) * 100.0)
+        except OSError:
+            cpu_load = None
+        ram_raw = _get_sysctl_value("hw.memsize")
+        if ram_raw:
+            try:
+                ram_total = float(ram_raw)
+            except ValueError:
+                ram_total = None
+        ram_used = _get_macos_ram_used_bytes(ram_total)
+
+    return {
+        "timestamp": _iso_now_local(),
+        "stage": stage,
+        "cpu_load_percent": cpu_load,
+        "ram_used_bytes": ram_used,
+        "ram_total_bytes": ram_total,
+        "nvidia_gpus": _get_nvidia_gpu_stats(),
+    }
+
+
+def _max_or_none(xs: Iterable[Optional[float]]) -> Optional[float]:
+    vals = [float(x) for x in xs if x is not None]
+    return max(vals) if vals else None
+
+
+def _aggregate_gpu_resource_samples(snapshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_gpu: Dict[str, List[Dict[str, Any]]] = {}
+    for snap in snapshots:
+        for gpu in snap.get("nvidia_gpus", []):
+            key = f"{gpu.get('index')}|{gpu.get('name')}"
+            by_gpu.setdefault(key, []).append(gpu)
+
+    rows: List[Dict[str, Any]] = []
+    for key in sorted(by_gpu):
+        items = by_gpu[key]
+        first = items[0]
+        rows.append(
+            {
+                "index": first.get("index"),
+                "name": first.get("name"),
+                "driver_version": first.get("driver_version"),
+                "vram_total_mb": first.get("vram_total_mb"),
+                "peak_vram_used_mb": _max_or_none(i.get("vram_used_mb") for i in items),
+                "peak_gpu_util_percent": _max_or_none(i.get("gpu_util_percent") for i in items),
+                "peak_temperature_c": _max_or_none(i.get("temperature_c") for i in items),
+                "peak_power_w": _max_or_none(i.get("power_w") for i in items),
+            }
+        )
+    return rows
 
 
 @dataclass(frozen=True)
@@ -144,7 +643,17 @@ class RunResult:
     gen_toks_per_s: Optional[float]
 
 
-def _discover_models(host: str, timeout_s: float) -> List[str]:
+def _is_cloud_model(model: str) -> bool:
+    return "cloud" in model.lower()
+
+
+def _filter_cloud_models(models: List[str]) -> Tuple[List[str], List[str]]:
+    local_models = [m for m in models if not _is_cloud_model(m)]
+    cloud_models = [m for m in models if _is_cloud_model(m)]
+    return local_models, cloud_models
+
+
+def _discover_models(host: str, timeout_s: float, include_cloud: bool) -> Tuple[List[str], List[str]]:
     tags = _http_json(f"{host}/api/tags", timeout_s=timeout_s)
     models = []
     for m in tags.get("models", []) or []:
@@ -152,9 +661,14 @@ def _discover_models(host: str, timeout_s: float) -> List[str]:
         if isinstance(name, str) and name.strip():
             models.append(name.strip())
     models = sorted(set(models))
+    skipped_cloud: List[str] = []
+    if not include_cloud:
+        models, skipped_cloud = _filter_cloud_models(models)
     if not models:
-        raise RuntimeError("No models found from /api/tags. Is Ollama running and has models pulled?")
-    return models
+        if skipped_cloud:
+            raise RuntimeError("Only cloud models were found from /api/tags. Re-run with --include-cloud to benchmark them.")
+        raise RuntimeError("No local models found from /api/tags. Is Ollama running and has models pulled?")
+    return models, skipped_cloud
 
 
 def _generate_once(
@@ -267,6 +781,8 @@ def _render_report(
     options: Dict[str, Any],
     keep_alive: Optional[str],
     all_results: Dict[str, List[RunResult]],
+    pc_metadata: Dict[str, Any],
+    resource_snapshots: List[Dict[str, Any]],
 ) -> str:
     lines: List[str] = []
     lines.append(f"# Ollama Benchmark Report")
@@ -274,6 +790,8 @@ def _render_report(
     lines.append(f"- Started: `{started_at}`")
     lines.append(f"- Host: `{host}`")
     lines.append(f"- Python: `{platform.python_version()}`")
+    lines.append(f"- Python executable: `{sys.executable}`")
+    lines.append(f"- Virtual env: `{_virtualenv_path() or '-'}`")
     lines.append(f"- Platform: `{platform.platform()}`")
     lines.append(f"- Models: `{', '.join(models)}`")
     lines.append(f"- Runs per model: `{runs}` (warmup: `{warmup}`)")
@@ -283,6 +801,60 @@ def _render_report(
     if options:
         lines.append(f"- Options: `{json.dumps(options, sort_keys=True)}`")
     lines.append(f"- Prompt: `{prompt_desc}`")
+    lines.append("")
+
+    lines.append("## PC")
+    lines.append("")
+    lines.append("| Field | Value |")
+    lines.append("|---|---|")
+    lines.append(f"| Computer | `{_md_escape(_fmt_maybe(pc_metadata.get('computer_name')))}` |")
+    lines.append(f"| User | `{_md_escape(_fmt_maybe(pc_metadata.get('user_name')))}` |")
+    lines.append(f"| Manufacturer | `{_md_escape(_fmt_maybe(pc_metadata.get('manufacturer')))}` |")
+    lines.append(f"| Model | `{_md_escape(_fmt_maybe(pc_metadata.get('model')))}` |")
+    os_value = f"{_fmt_maybe(pc_metadata.get('os_caption'))} {_fmt_maybe(pc_metadata.get('os_version'))}".strip()
+    lines.append(f"| OS | `{_md_escape(os_value)}` |")
+    lines.append(f"| CPU | `{_md_escape(_fmt_maybe(pc_metadata.get('cpu')))}` |")
+    lines.append(
+        f"| CPU cores / logical processors | `{_fmt_maybe(pc_metadata.get('cpu_cores'))} / {_fmt_maybe(pc_metadata.get('cpu_logical_processors'))}` |"
+    )
+    lines.append(f"| RAM | `{_fmt_bytes(pc_metadata.get('ram_bytes'))}` |")
+    gpu_list = ", ".join(pc_metadata.get("gpus") or []) or "-"
+    lines.append(f"| GPUs | `{_md_escape(gpu_list)}` |")
+    lines.append("")
+
+    lines.append("## Observed resources")
+    lines.append("")
+    lines.append(
+        "Resource values are point-in-time samples captured around warmup and measured runs; GPU/VRAM rows require NVIDIA `nvidia-smi`."
+    )
+    lines.append("")
+    peak_cpu = _max_or_none(s.get("cpu_load_percent") for s in resource_snapshots)
+    peak_ram = _max_or_none(s.get("ram_used_bytes") for s in resource_snapshots)
+    ram_total = _max_or_none(s.get("ram_total_bytes") for s in resource_snapshots)
+    lines.append(f"- Peak observed CPU load: `{_fmt_float(peak_cpu, 2)}%`")
+    lines.append(f"- Peak observed RAM used: `{_fmt_bytes(peak_ram)}` / `{_fmt_bytes(ram_total)}`")
+    gpu_agg = _aggregate_gpu_resource_samples(resource_snapshots)
+    if gpu_agg:
+        lines.append("")
+        lines.append("| GPU | Driver | VRAM used peak / total (MB) | GPU util peak (%) | Temp peak (C) | Power peak (W) |")
+        lines.append("|---|---|---:|---:|---:|---:|")
+        for g in gpu_agg:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _md_escape(f"{g.get('index')}: {g.get('name')}"),
+                        _md_escape(_fmt_maybe(g.get("driver_version"))),
+                        f"{_fmt_float(g.get('peak_vram_used_mb'), 0)} / {_fmt_float(g.get('vram_total_mb'), 0)}",
+                        _fmt_float(g.get("peak_gpu_util_percent"), 0),
+                        _fmt_float(g.get("peak_temperature_c"), 0),
+                        _fmt_float(g.get("peak_power_w"), 2),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("- NVIDIA GPU samples: `not available`")
     lines.append("")
 
     lines.append("## Summary")
@@ -363,13 +935,24 @@ def _parse_models_arg(models_arg: Optional[str]) -> Optional[List[str]]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    _bootstrap_venv_if_needed(argv)
+    session_t0 = time.perf_counter()
+
     p = argparse.ArgumentParser(description="Benchmark local Ollama models and write a Markdown report.")
+    p.add_argument("--no-venv", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--host", default="http://localhost:11434", help="Ollama host (default: http://localhost:11434)")
     p.add_argument("--models", default=None, help="Comma-separated models. If omitted, auto-discover via /api/tags")
+    p.add_argument("--include-cloud", action="store_true", help="Include Ollama cloud models. By default models with 'cloud' in the name are skipped.")
     p.add_argument("--runs", type=int, default=3, help="Measured runs per model (default: 3)")
     p.add_argument("--warmup", type=int, default=1, help="Warmup runs per model, not included in summary (default: 1)")
     p.add_argument("--timeout-s", type=float, default=600.0, help="Per-request timeout in seconds (default: 600)")
-    p.add_argument("--out", default=None, help="Output Markdown path (default: reports/ollama-bench-<timestamp>.md)")
+    p.add_argument(
+        "--out",
+        default=None,
+        help="Output Markdown path (default: reports/<machine>/ollama-bench-<timestamp>.md)",
+    )
     p.add_argument("--prompt", default=None, help="Prompt text (overrides --prompt-file)")
     p.add_argument("--prompt-file", default=None, help="Path to a text file containing the prompt")
     p.add_argument("--keep-alive", default="5m", help="Ollama keep_alive value (default: 5m). Use '0' to disable.")
@@ -383,10 +966,34 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     host = args.host.rstrip("/")
     started_at = _iso_now_local()
+    _log(f"Starting Ollama benchmark session at {started_at}")
+    _log(f"Ollama host: {host}")
+    _log(f"Python executable: {sys.executable}")
+    if _virtualenv_path():
+        _log(f"Virtual env: {_virtualenv_path()}")
+    else:
+        _log("Virtual env: not active")
+
+    _log("Collecting PC metadata and initial resource snapshot")
+    pc_metadata = _get_pc_metadata()
+    resource_snapshots: List[Dict[str, Any]] = [_get_resource_snapshot("start")]
 
     models = _parse_models_arg(args.models)
     if models is None:
-        models = _discover_models(host, timeout_s=args.timeout_s)
+        _log("Discovering models from Ollama /api/tags")
+        models, skipped_cloud = _discover_models(host, timeout_s=args.timeout_s, include_cloud=args.include_cloud)
+        if skipped_cloud:
+            _log(f"Skipping {len(skipped_cloud)} cloud model(s): {', '.join(skipped_cloud)}")
+        _log(f"Discovered {len(models)} model(s): {', '.join(models)}")
+    else:
+        skipped_cloud: List[str] = []
+        if not args.include_cloud:
+            models, skipped_cloud = _filter_cloud_models(models)
+            if skipped_cloud:
+                _log(f"Skipping {len(skipped_cloud)} requested cloud model(s): {', '.join(skipped_cloud)}")
+            if not models:
+                raise SystemExit("Only cloud models were requested. Re-run with --include-cloud to benchmark them.")
+        _log(f"Using {len(models)} requested model(s): {', '.join(models)}")
 
     if args.prompt is not None and args.prompt_file is not None:
         raise SystemExit("Provide only one of --prompt or --prompt-file")
@@ -429,18 +1036,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_path = args.out
     if out_path is None:
         ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        out_path = os.path.join("reports", f"ollama-bench-{ts}.md")
+        machine_slug = _slugify_path_part(pc_metadata.get("computer_name"))
+        out_path = os.path.join("reports", machine_slug, f"ollama-bench-{ts}.md")
     out_dir = os.path.dirname(out_path) or "."
     _ensure_dir(out_dir)
+    _log(f"Report path: {out_path}")
+    _log(f"Runs per model: {args.runs}; warmup runs per model: {args.warmup}")
+    _log(f"Generation options: {json.dumps(options, sort_keys=True)}")
 
     # Run benchmarks.
     all_results: Dict[str, List[RunResult]] = {m: [] for m in models}
 
     # Warmup (not recorded) to amortize first-token/model-load effects if desired.
     if args.warmup > 0:
+        _log("Starting warmup phase")
         for model in models:
-            for _ in range(args.warmup):
-                _generate_once(
+            _log(f"Starting warmup for model {model}")
+            model_warmup_t0 = time.perf_counter()
+            for i in range(args.warmup):
+                run_t0 = time.perf_counter()
+                _log(f"Warmup {i + 1}/{args.warmup} for {model}: started")
+                resource_snapshots.append(_get_resource_snapshot(f"before warmup {model}"))
+                warmup_result = _generate_once(
                     host=host,
                     model=model,
                     prompt=prompt,
@@ -448,9 +1065,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                     options=options,
                     keep_alive=keep_alive,
                 )
+                resource_snapshots.append(_get_resource_snapshot(f"after warmup {model}"))
+                status = "ok" if warmup_result.ok else f"failed: {warmup_result.error}"
+                _log(f"Warmup {i + 1}/{args.warmup} for {model}: {status} in {_fmt_duration(time.perf_counter() - run_t0)}")
+            _log(f"Completed warmup for model {model} in {_fmt_duration(time.perf_counter() - model_warmup_t0)}")
 
+    _log("Starting measured benchmark phase")
     for model in models:
-        for _ in range(args.runs):
+        _log(f"Starting model {model}")
+        model_t0 = time.perf_counter()
+        for i in range(args.runs):
+            run_t0 = time.perf_counter()
+            _log(f"Run {i + 1}/{args.runs} for {model}: started")
+            resource_snapshots.append(_get_resource_snapshot(f"before run {model} #{i + 1}"))
             r = _generate_once(
                 host=host,
                 model=model,
@@ -460,7 +1087,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                 keep_alive=keep_alive,
             )
             all_results[model].append(r)
+            resource_snapshots.append(_get_resource_snapshot(f"after run {model} #{i + 1}"))
+            if r.ok:
+                _log(
+                    f"Run {i + 1}/{args.runs} for {model}: ok in {_fmt_duration(time.perf_counter() - run_t0)} "
+                    f"(gen tok/s: {_fmt_float(r.gen_toks_per_s, 2)}, wall: {_fmt_float(r.wall_s, 2)}s)"
+                )
+            else:
+                _log(f"Run {i + 1}/{args.runs} for {model}: failed in {_fmt_duration(time.perf_counter() - run_t0)}: {r.error}")
+        model_elapsed = time.perf_counter() - model_t0
+        agg = _aggregate(all_results[model])
+        _log(
+            f"Completed model {model} in {_fmt_duration(model_elapsed)} "
+            f"({agg['ok_runs']}/{agg['runs']} ok, mean gen tok/s: {_fmt_float(agg['gen_tps_mean'], 2)})"
+        )
 
+    resource_snapshots.append(_get_resource_snapshot("end"))
+
+    _log("Rendering markdown report")
     report = _render_report(
         started_at=started_at,
         host=host,
@@ -472,16 +1116,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         options=options,
         keep_alive=keep_alive,
         all_results=all_results,
+        pc_metadata=pc_metadata,
+        resource_snapshots=resource_snapshots,
     )
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(report)
         f.write("\n")
 
-    # Print a friendly one-liner for CLI users.
-    sys.stdout.write(out_path + "\n")
+    session_elapsed = time.perf_counter() - session_t0
+    _log(f"Report written: {out_path}")
+    _log(f"Benchmark session completed in {_fmt_duration(session_elapsed)}")
+    sys.stdout.write(f"{out_path}\n")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
