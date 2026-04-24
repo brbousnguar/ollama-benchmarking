@@ -6,6 +6,8 @@ Local benchmarking helpers for locally hosted LLMs.
 
 Script: `scripts/ollama_bench.py`
 
+Default config: `ollama-bench.json`
+
 Benchmarks one or more local Ollama models via the HTTP API and writes a Markdown report including:
 
 - Generation tokens/sec (from Ollama `eval_count` / `eval_duration`)
@@ -15,12 +17,25 @@ Benchmarks one or more local Ollama models via the HTTP API and writes a Markdow
 - Observed resource samples around benchmark runs: peak CPU/RAM and NVIDIA GPU/VRAM metrics when `nvidia-smi` is available
 - Verbose console progress logs for discovery, warmup, each measured run, report writing, and total session time
 - Local-only model selection by default; Ollama cloud models are skipped unless `--include-cloud` is provided
+- Model selection order: `--models`, then `ollama-bench.json`, then Ollama auto-discovery
+- Missing selected models are pulled automatically with `ollama pull <model>`
 
 By default, reports are grouped by machine under `reports/<machine>/`, for example `reports/my-laptop/ollama-bench-20260423-151324.md`.
 
 ### Usage
 
 The script automatically creates and uses a local `.venv` on first run. It has no third-party Python dependencies, so the venv is only used to keep execution isolated and consistent across machines.
+
+If `ollama-bench.json` exists, the script uses the `models` array from that file by default. Example:
+
+```json
+{
+  "models": [
+    "llama3.2:1b",
+    "qwen2.5-coder:1.5b"
+  ]
+}
+```
 
 Auto-discover models from the local Ollama instance and run 3 measured runs (1 warmup):
 
@@ -32,6 +47,12 @@ Benchmark specific models:
 
 ```bash
 python scripts/ollama_bench.py --models llama3,phi3
+```
+
+Use a different config file:
+
+```bash
+python scripts/ollama_bench.py --config my-models.json
 ```
 
 Cloud models are skipped by default, including names such as `kimi-k2.6:cloud` or `gpt-oss:20b-cloud`. To include them:

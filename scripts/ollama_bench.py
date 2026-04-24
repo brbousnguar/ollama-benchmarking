@@ -38,6 +38,9 @@ def _repo_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+_DEFAULT_CONFIG_PATH = os.path.join(_repo_root(), "ollama-bench.json")
+
+
 def _running_in_virtualenv() -> bool:
     return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
 
@@ -115,6 +118,14 @@ def _ensure_dir(path: str) -> None:
 def _read_text_file(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def _read_json_file(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Config file must contain a JSON object: {path}")
+    return data
 
 
 def _http_json(
@@ -238,6 +249,18 @@ def _run_command(args: List[str], timeout_s: float = 5.0) -> Optional[str]:
     if p.returncode != 0:
         return None
     return p.stdout.strip()
+
+
+def _run_streaming_command(args: List[str]) -> int:
+    p = subprocess.Popen(args)
+    try:
+        return p.wait()
+    except KeyboardInterrupt:
+        try:
+            p.terminate()
+        except OSError:
+            pass
+        raise
 
 
 def _get_windows_wmic_value(args: List[str], field: str) -> Optional[str]:
@@ -627,6 +650,26 @@ def _aggregate_gpu_resource_samples(snapshots: List[Dict[str, Any]]) -> List[Dic
     return rows
 
 
+def _load_config_models(config_path: str) -> Optional[List[str]]:
+    if not os.path.exists(config_path):
+        return None
+    config = _read_json_file(config_path)
+    raw_models = config.get("models")
+    if raw_models is None:
+        raise RuntimeError(f"Config file does not define a 'models' array: {config_path}")
+    if not isinstance(raw_models, list):
+        raise RuntimeError(f"Config file 'models' must be an array: {config_path}")
+
+    models: List[str] = []
+    for item in raw_models:
+        if not isinstance(item, str):
+            raise RuntimeError(f"Config file 'models' entries must be strings: {config_path}")
+        model = item.strip()
+        if model:
+            models.append(model)
+    return sorted(set(models)) or []
+
+
 @dataclass(frozen=True)
 class RunResult:
     model: str
@@ -653,14 +696,18 @@ def _filter_cloud_models(models: List[str]) -> Tuple[List[str], List[str]]:
     return local_models, cloud_models
 
 
-def _discover_models(host: str, timeout_s: float, include_cloud: bool) -> Tuple[List[str], List[str]]:
+def _list_ollama_models(host: str, timeout_s: float) -> List[str]:
     tags = _http_json(f"{host}/api/tags", timeout_s=timeout_s)
     models = []
     for m in tags.get("models", []) or []:
         name = m.get("name")
         if isinstance(name, str) and name.strip():
             models.append(name.strip())
-    models = sorted(set(models))
+    return sorted(set(models))
+
+
+def _discover_models(host: str, timeout_s: float, include_cloud: bool) -> Tuple[List[str], List[str]]:
+    models = _list_ollama_models(host, timeout_s)
     skipped_cloud: List[str] = []
     if not include_cloud:
         models, skipped_cloud = _filter_cloud_models(models)
@@ -669,6 +716,24 @@ def _discover_models(host: str, timeout_s: float, include_cloud: bool) -> Tuple[
             raise RuntimeError("Only cloud models were found from /api/tags. Re-run with --include-cloud to benchmark them.")
         raise RuntimeError("No local models found from /api/tags. Is Ollama running and has models pulled?")
     return models, skipped_cloud
+
+
+def _ensure_models_available(host: str, models: List[str], timeout_s: float) -> None:
+    installed = set(_list_ollama_models(host, timeout_s))
+    missing = [m for m in models if m not in installed]
+    if not missing:
+        _log("All selected models are already available locally")
+        return
+    if shutil.which("ollama") is None:
+        raise RuntimeError("Some models are missing locally and the 'ollama' CLI was not found in PATH.")
+
+    for model in missing:
+        _log(f"Model {model} not found locally; pulling with `ollama pull {model}`")
+        t0 = time.perf_counter()
+        rc = _run_streaming_command(["ollama", "pull", model])
+        if rc != 0:
+            raise RuntimeError(f"`ollama pull {model}` failed with exit code {rc}")
+        _log(f"Completed pull for {model} in {_fmt_duration(time.perf_counter() - t0)}")
 
 
 def _generate_once(
@@ -943,6 +1008,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Benchmark local Ollama models and write a Markdown report.")
     p.add_argument("--no-venv", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--host", default="http://localhost:11434", help="Ollama host (default: http://localhost:11434)")
+    p.add_argument("--config", default=_DEFAULT_CONFIG_PATH, help=f"Config JSON path (default: {_DEFAULT_CONFIG_PATH})")
     p.add_argument("--models", default=None, help="Comma-separated models. If omitted, auto-discover via /api/tags")
     p.add_argument("--include-cloud", action="store_true", help="Include Ollama cloud models. By default models with 'cloud' in the name are skipped.")
     p.add_argument("--runs", type=int, default=3, help="Measured runs per model (default: 3)")
@@ -978,7 +1044,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     pc_metadata = _get_pc_metadata()
     resource_snapshots: List[Dict[str, Any]] = [_get_resource_snapshot("start")]
 
+    config_models = _load_config_models(args.config)
+    if config_models is not None:
+        _log(f"Loaded config file: {args.config}")
+
     models = _parse_models_arg(args.models)
+    model_source = "command line"
+    if models is None and config_models is not None:
+        models = config_models
+        model_source = f"config file ({args.config})"
+
     if models is None:
         _log("Discovering models from Ollama /api/tags")
         models, skipped_cloud = _discover_models(host, timeout_s=args.timeout_s, include_cloud=args.include_cloud)
@@ -986,14 +1061,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             _log(f"Skipping {len(skipped_cloud)} cloud model(s): {', '.join(skipped_cloud)}")
         _log(f"Discovered {len(models)} model(s): {', '.join(models)}")
     else:
-        skipped_cloud: List[str] = []
+        skipped_cloud = []
         if not args.include_cloud:
             models, skipped_cloud = _filter_cloud_models(models)
             if skipped_cloud:
-                _log(f"Skipping {len(skipped_cloud)} requested cloud model(s): {', '.join(skipped_cloud)}")
+                _log(f"Skipping {len(skipped_cloud)} cloud model(s) from {model_source}: {', '.join(skipped_cloud)}")
             if not models:
-                raise SystemExit("Only cloud models were requested. Re-run with --include-cloud to benchmark them.")
-        _log(f"Using {len(models)} requested model(s): {', '.join(models)}")
+                raise SystemExit("Only cloud models were selected. Re-run with --include-cloud to benchmark them.")
+        _log(f"Using {len(models)} model(s) from {model_source}: {', '.join(models)}")
+
+    if not models:
+        raise SystemExit("No models selected. Add models to the config file, pass --models, or let the script auto-discover models.")
+
+    _ensure_models_available(host=host, models=models, timeout_s=args.timeout_s)
 
     if args.prompt is not None and args.prompt_file is not None:
         raise SystemExit("Provide only one of --prompt or --prompt-file")
