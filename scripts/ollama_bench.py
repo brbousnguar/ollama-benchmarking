@@ -111,6 +111,87 @@ def _slugify_path_part(value: Any, fallback: str = "unknown-machine") -> str:
     return slug or fallback
 
 
+def _rounded_ram_gb(ram_bytes: Optional[float]) -> Optional[int]:
+    if ram_bytes is None or ram_bytes <= 0:
+        return None
+    return int(round(ram_bytes / (1024 ** 3)))
+
+
+def _primary_gpu_label(gpus: List[str]) -> str:
+    joined = " ".join(gpus).lower()
+    if "nvidia" in joined:
+        return "nvidia"
+    if "amd" in joined or "radeon" in joined:
+        return "amd"
+    if "intel" in joined or "iris" in joined:
+        return "intel"
+    if "apple" in joined:
+        return "apple-gpu"
+    if gpus:
+        return _slugify_path_part(gpus[0], "gpu")
+    return "cpu"
+
+
+def _os_family_label(pc_metadata: Dict[str, Any]) -> str:
+    os_caption = str(pc_metadata.get("os_caption") or "").lower()
+    os_version = str(pc_metadata.get("os_version") or "").lower()
+    if "windows" in os_caption:
+        if "11" in os_caption or os_version.startswith("10.0.2"):
+            return "windows11"
+        return "windows"
+    if "macos" in os_caption:
+        return "macos"
+    if "linux" in os_caption:
+        return "linux"
+    return _slugify_path_part(os_caption or platform.system(), "unknown-os")
+
+
+def _cpu_family_label(pc_metadata: Dict[str, Any]) -> str:
+    cpu = str(pc_metadata.get("cpu") or "").lower()
+    if "apple m4" in cpu:
+        return "apple-m4"
+    if "apple m3" in cpu:
+        return "apple-m3"
+    if "apple m2" in cpu:
+        return "apple-m2"
+    if "apple m1" in cpu:
+        return "apple-m1"
+    if "ryzen" in cpu:
+        return "ryzen"
+    if "xeon" in cpu:
+        return "xeon"
+    if "intel" in cpu or "core(" in cpu or "core(tm)" in cpu:
+        return "intel"
+    return "cpu"
+
+
+def _anonymized_pc_profile(pc_metadata: Dict[str, Any]) -> Dict[str, str]:
+    ram_gb = _rounded_ram_gb(pc_metadata.get("ram_bytes"))
+    return {
+        "machine_label": _machine_label_parts(pc_metadata)[0],
+        "os_family": _os_family_label(pc_metadata),
+        "cpu_family": _cpu_family_label(pc_metadata),
+        "gpu_family": _primary_gpu_label(pc_metadata.get("gpus") or []),
+        "ram_class": f"{ram_gb}gb" if ram_gb is not None else "unknown-ram",
+    }
+
+
+def _machine_label_parts(pc_metadata: Dict[str, Any]) -> Tuple[str, str]:
+    ram_gb = _rounded_ram_gb(pc_metadata.get("ram_bytes"))
+    ram_label = f"{ram_gb}gb" if ram_gb is not None else "unknown-ram"
+    os_label = _os_family_label(pc_metadata)
+    cpu_family = _cpu_family_label(pc_metadata)
+    gpu_label = _primary_gpu_label(pc_metadata.get("gpus") or [])
+
+    if os_label == "macos" and cpu_family.startswith("apple-m"):
+        display = f"{cpu_family}-{ram_label}"
+        slug = display
+    else:
+        display = f"{os_label}-{gpu_label}-{ram_label}"
+        slug = display
+    return display, _slugify_path_part(slug, "unknown-machine")
+
+
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
@@ -251,10 +332,13 @@ def _run_command(args: List[str], timeout_s: float = 5.0) -> Optional[str]:
     return p.stdout.strip()
 
 
-def _run_streaming_command(args: List[str]) -> int:
+def _run_streaming_command(args: List[str]) -> Tuple[int, str]:
     p = subprocess.Popen(args)
     try:
-        return p.wait()
+        rc = p.wait()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return rc, ""
     except KeyboardInterrupt:
         try:
             p.terminate()
@@ -730,9 +814,10 @@ def _ensure_models_available(host: str, models: List[str], timeout_s: float) -> 
     for model in missing:
         _log(f"Model {model} not found locally; pulling with `ollama pull {model}`")
         t0 = time.perf_counter()
-        rc = _run_streaming_command(["ollama", "pull", model])
+        rc, output = _run_streaming_command(["ollama", "pull", model])
         if rc != 0:
-            raise RuntimeError(f"`ollama pull {model}` failed with exit code {rc}")
+            detail = output.strip().splitlines()[-1] if output.strip() else "see Ollama output above"
+            raise RuntimeError(f"`ollama pull {model}` failed with exit code {rc}: {detail}")
         _log(f"Completed pull for {model} in {_fmt_duration(time.perf_counter() - t0)}")
 
 
@@ -850,14 +935,16 @@ def _render_report(
     resource_snapshots: List[Dict[str, Any]],
 ) -> str:
     lines: List[str] = []
+    anon = _anonymized_pc_profile(pc_metadata)
+    machine_label = anon["machine_label"]
     lines.append(f"# Ollama Benchmark Report")
     lines.append("")
     lines.append(f"- Started: `{started_at}`")
     lines.append(f"- Host: `{host}`")
     lines.append(f"- Python: `{platform.python_version()}`")
-    lines.append(f"- Python executable: `{sys.executable}`")
-    lines.append(f"- Virtual env: `{_virtualenv_path() or '-'}`")
-    lines.append(f"- Platform: `{platform.platform()}`")
+    lines.append(f"- Python env: `{'venv' if _virtualenv_path() else 'system'}`")
+    lines.append(f"- Platform: `{anon['os_family']}`")
+    lines.append(f"- Machine label: `{machine_label}`")
     lines.append(f"- Models: `{', '.join(models)}`")
     lines.append(f"- Runs per model: `{runs}` (warmup: `{warmup}`)")
     lines.append(f"- Timeout (s): `{timeout_s}`")
@@ -872,19 +959,14 @@ def _render_report(
     lines.append("")
     lines.append("| Field | Value |")
     lines.append("|---|---|")
-    lines.append(f"| Computer | `{_md_escape(_fmt_maybe(pc_metadata.get('computer_name')))}` |")
-    lines.append(f"| User | `{_md_escape(_fmt_maybe(pc_metadata.get('user_name')))}` |")
-    lines.append(f"| Manufacturer | `{_md_escape(_fmt_maybe(pc_metadata.get('manufacturer')))}` |")
-    lines.append(f"| Model | `{_md_escape(_fmt_maybe(pc_metadata.get('model')))}` |")
-    os_value = f"{_fmt_maybe(pc_metadata.get('os_caption'))} {_fmt_maybe(pc_metadata.get('os_version'))}".strip()
-    lines.append(f"| OS | `{_md_escape(os_value)}` |")
-    lines.append(f"| CPU | `{_md_escape(_fmt_maybe(pc_metadata.get('cpu')))}` |")
+    lines.append(f"| Machine label | `{_md_escape(machine_label)}` |")
+    lines.append(f"| OS family | `{anon['os_family']}` |")
+    lines.append(f"| CPU family | `{anon['cpu_family']}` |")
+    lines.append(f"| GPU family | `{anon['gpu_family']}` |")
+    lines.append(f"| RAM class | `{anon['ram_class']}` |")
     lines.append(
         f"| CPU cores / logical processors | `{_fmt_maybe(pc_metadata.get('cpu_cores'))} / {_fmt_maybe(pc_metadata.get('cpu_logical_processors'))}` |"
     )
-    lines.append(f"| RAM | `{_fmt_bytes(pc_metadata.get('ram_bytes'))}` |")
-    gpu_list = ", ".join(pc_metadata.get("gpus") or []) or "-"
-    lines.append(f"| GPUs | `{_md_escape(gpu_list)}` |")
     lines.append("")
 
     lines.append("## Observed resources")
@@ -1042,7 +1124,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     _log("Collecting PC metadata and initial resource snapshot")
     pc_metadata = _get_pc_metadata()
+    machine_label, machine_slug = _machine_label_parts(pc_metadata)
     resource_snapshots: List[Dict[str, Any]] = [_get_resource_snapshot("start")]
+    _log(f"Anonymized machine label: {machine_label}")
 
     config_models = _load_config_models(args.config)
     if config_models is not None:
@@ -1116,7 +1200,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_path = args.out
     if out_path is None:
         ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        machine_slug = _slugify_path_part(pc_metadata.get("computer_name"))
         out_path = os.path.join("reports", machine_slug, f"ollama-bench-{ts}.md")
     out_dir = os.path.dirname(out_path) or "."
     _ensure_dir(out_dir)

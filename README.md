@@ -19,8 +19,9 @@ Benchmarks one or more local Ollama models via the HTTP API and writes a Markdow
 - Local-only model selection by default; Ollama cloud models are skipped unless `--include-cloud` is provided
 - Model selection order: `--models`, then `ollama-bench.json`, then Ollama auto-discovery
 - Missing selected models are pulled automatically with `ollama pull <model>`
+- Reports use an anonymized machine label instead of personal identifiers such as username, computer name, exact local paths, or exact hardware model names
 
-By default, reports are grouped by machine under `reports/<machine>/`, for example `reports/my-laptop/ollama-bench-20260423-151324.md`.
+By default, reports are grouped by anonymized machine label under `reports/<machine-label>/`, for example `reports/windows11-nvidia-32gb/ollama-bench-20260423-151324.md` or `reports/apple-m4-24gb/ollama-bench-20260423-151324.md`.
 
 ### Usage
 

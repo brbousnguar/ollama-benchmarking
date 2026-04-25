@@ -4,7 +4,7 @@
     "llama3:8b",
     "mistral:7b",
     "phi3:mini",
-    "gemma3:2b",
+    "gemma3:1b",
     "gemma3:270m"
   ]
 }
