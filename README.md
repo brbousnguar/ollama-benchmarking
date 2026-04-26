@@ -38,45 +38,61 @@ If `ollama-bench.json` exists, the script uses the `models` array from that file
 }
 ```
 
+On macOS or Linux, use `python3` because stock macOS does not provide a `python` command by default:
+
+```bash
+python3 scripts/ollama_bench.py
+```
+
+The script is also executable on macOS/Linux, so this is equivalent:
+
+```bash
+./scripts/ollama_bench.py
+```
+
+On Windows, use Python Launcher or your existing Python 3 command:
+
+```powershell
+py -3 scripts\ollama_bench.py
+```
+
 Auto-discover models from the local Ollama instance and run 3 measured runs (1 warmup):
 
 ```bash
-python scripts/ollama_bench.py
+python3 scripts/ollama_bench.py
 ```
 
 Benchmark specific models:
 
 ```bash
-python scripts/ollama_bench.py --models llama3,phi3
+python3 scripts/ollama_bench.py --models llama3,phi3
 ```
 
 Use a different config file:
 
 ```bash
-python scripts/ollama_bench.py --config my-models.json
+python3 scripts/ollama_bench.py --config my-models.json
 ```
 
 Cloud models are skipped by default, including names such as `kimi-k2.6:cloud` or `gpt-oss:20b-cloud`. To include them:
 
 ```bash
-python scripts/ollama_bench.py --include-cloud
+python3 scripts/ollama_bench.py --include-cloud
 ```
 
 Control generation length / context:
 
 ```bash
-python scripts/ollama_bench.py --models llama3 --num-predict 512 --num-ctx 8192
+python3 scripts/ollama_bench.py --models llama3 --num-predict 512 --num-ctx 8192
 ```
 
 Custom prompt from a file, custom report path:
 
 ```bash
-python scripts/ollama_bench.py --prompt-file prompts/throughput.txt --out reports/my-run.md
+python3 scripts/ollama_bench.py --prompt-file prompts/throughput.txt --out reports/my-run.md
 ```
 
 `--out` overrides the machine-grouped default path.
-
-On macOS or Linux, use `python3` if `python` is not mapped to Python 3. On Windows, `py -3 scripts\ollama_bench.py` is also fine.
 
 You do not need to activate `.venv` manually. If it is already activated, the script detects that and runs directly inside it:
 
@@ -88,5 +104,5 @@ python scripts\ollama_bench.py
 To skip the automatic venv for a one-off run:
 
 ```bash
-python scripts/ollama_bench.py --no-venv
+python3 scripts/ollama_bench.py --no-venv
 ```
