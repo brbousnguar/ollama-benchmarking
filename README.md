@@ -23,6 +23,29 @@ Benchmarks one or more local Ollama models via the HTTP API and writes a Markdow
 
 By default, reports are grouped by anonymized machine label under `reports/<machine-label>/`, for example `reports/windows11-nvidia-32gb/ollama-bench-20260423-151324.md` or `reports/apple-m4-24gb/ollama-bench-20260423-151324.md`.
 
+## Compare machines
+
+Script: `scripts/compare_latest_reports.py`
+
+After collecting benchmark reports from more than one PC, generate a comparison from the newest report in each `reports/<machine-label>/` folder:
+
+```bash
+python3 scripts/compare_latest_reports.py
+```
+
+The comparison is written to `reports/comparisons/latest-comparison-<timestamp>.md` and includes:
+
+- The source report chosen for each machine
+- The fastest machine per common model
+- Generation throughput per model, with percentage difference from the first machine in the report
+- Mean wall time per model
+
+To choose a specific output path:
+
+```bash
+python3 scripts/compare_latest_reports.py --out reports/comparisons/latest.md
+```
+
 ### Usage
 
 The script automatically creates and uses a local `.venv` on first run. It has no third-party Python dependencies, so the venv is only used to keep execution isolated and consistent across machines.
