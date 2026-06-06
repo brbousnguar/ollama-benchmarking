@@ -1,10 +1,12 @@
 {
   "models": [
-    "qwen2.5:7b",
-    "llama3:8b",
-    "mistral:7b",
-    "phi3:mini",
     "gemma3:1b",
-    "gemma3:270m"
+    "qwen3:4b",
+    "qwen3:8b",
+    "qwen3:30b",
+    "gpt-oss:20b",
+    "phi4-mini",
+    "deepseek-r1:8b",
+    "mistral:7b"
   ]
 }

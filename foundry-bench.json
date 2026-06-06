@@ -1,0 +1,12 @@
+{
+  "models": [
+    "qwen2.5-1.5b",
+    "qwen2.5-7b",
+    "qwen2.5-coder-7b",
+    "phi-4-mini",
+    "phi-4",
+    "deepseek-r1-7b",
+    "mistral-7b-v0.2",
+    "gpt-oss-20b"
+  ]
+}

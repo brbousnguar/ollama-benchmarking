@@ -13,10 +13,10 @@ import datetime as _dt
 import os
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-_REPORT_RE = re.compile(r"^ollama-bench-(\d{8}-\d{6})\.md$")
+_REPORT_RE = re.compile(r"^(ollama|foundry)-bench-(\d{8}-\d{6})\.md$")
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,8 @@ class ModelSummary:
     gen_tps_p90: Optional[float]
     gen_tps_stdev: Optional[float]
     prompt_tps_mean: Optional[float]
+    ttft_ms_mean: Optional[float]
+    eff_bw_mean: Optional[float]
     total_s_mean: Optional[float]
     wall_s_mean: Optional[float]
 
@@ -34,6 +36,7 @@ class ModelSummary:
 @dataclass(frozen=True)
 class BenchmarkReport:
     path: str
+    engine: str
     started: str
     machine_label: str
     platform: str
@@ -73,12 +76,34 @@ def _metadata_value(lines: Iterable[str], key: str) -> str:
     return "-"
 
 
+# Map normalized summary header cells to ModelSummary fields. This makes the
+# parser tolerant of new columns and backward-compatible with older reports
+# that lack the TTFT / effective-bandwidth columns.
+_COLUMN_FIELDS = {
+    "ok/total": "ok_total",
+    "gen tok/s (mean)": "gen_tps_mean",
+    "gen tok/s (p50)": "gen_tps_p50",
+    "gen tok/s (p90)": "gen_tps_p90",
+    "gen tok/s (stdev)": "gen_tps_stdev",
+    "prompt tok/s (mean)": "prompt_tps_mean",
+    "ttft ms (mean)": "ttft_ms_mean",
+    "eff bw gb/s (mean)": "eff_bw_mean",
+    "total s (mean)": "total_s_mean",
+    "wall s (mean)": "wall_s_mean",
+}
+_FLOAT_FIELDS = {
+    "gen_tps_mean", "gen_tps_p50", "gen_tps_p90", "gen_tps_stdev",
+    "prompt_tps_mean", "ttft_ms_mean", "eff_bw_mean", "total_s_mean", "wall_s_mean",
+}
+
+
 def _parse_summary(lines: List[str]) -> Dict[str, ModelSummary]:
     try:
         start = lines.index("## Summary")
     except ValueError as e:
         raise RuntimeError("Missing '## Summary' section") from e
 
+    header_fields: Optional[List[str]] = None
     rows: Dict[str, ModelSummary] = {}
     for line in lines[start + 1 :]:
         stripped = line.strip()
@@ -86,22 +111,35 @@ def _parse_summary(lines: List[str]) -> Dict[str, ModelSummary]:
             break
         if not stripped.startswith("|"):
             continue
-        if stripped.startswith("|---") or stripped.startswith("| Model "):
+        cells = _split_md_row(stripped)
+        if not cells:
+            continue
+        first = cells[0].strip().lower()
+        if first == "model":
+            # Header row: map each column (after Model) to a field name.
+            header_fields = [_COLUMN_FIELDS.get(c.strip().lower()) for c in cells[1:]]
+            continue
+        if set(cells[0]) <= {"-", ":"}:  # separator row like |---|
+            continue
+        if header_fields is None:
             continue
 
-        cells = _split_md_row(stripped)
-        if len(cells) < 9:
-            continue
-        model = cells[0]
-        rows[model] = ModelSummary(
-            ok_total=cells[1],
-            gen_tps_mean=_parse_float(cells[2]),
-            gen_tps_p50=_parse_float(cells[3]),
-            gen_tps_p90=_parse_float(cells[4]),
-            gen_tps_stdev=_parse_float(cells[5]),
-            prompt_tps_mean=_parse_float(cells[6]),
-            total_s_mean=_parse_float(cells[7]),
-            wall_s_mean=_parse_float(cells[8]),
+        values: Dict[str, Any] = {field: None for field in _COLUMN_FIELDS.values()}
+        for field, cell in zip(header_fields, cells[1:]):
+            if field is None:
+                continue
+            values[field] = _parse_float(cell) if field in _FLOAT_FIELDS else cell
+        rows[cells[0]] = ModelSummary(
+            ok_total=values.get("ok_total") or "-",
+            gen_tps_mean=values.get("gen_tps_mean"),
+            gen_tps_p50=values.get("gen_tps_p50"),
+            gen_tps_p90=values.get("gen_tps_p90"),
+            gen_tps_stdev=values.get("gen_tps_stdev"),
+            prompt_tps_mean=values.get("prompt_tps_mean"),
+            ttft_ms_mean=values.get("ttft_ms_mean"),
+            eff_bw_mean=values.get("eff_bw_mean"),
+            total_s_mean=values.get("total_s_mean"),
+            wall_s_mean=values.get("wall_s_mean"),
         )
     if not rows:
         raise RuntimeError("Summary table did not contain any model rows")
@@ -113,8 +151,14 @@ def _parse_report(path: str) -> BenchmarkReport:
         lines = [line.rstrip("\n") for line in f]
 
     machine_label = _metadata_value(lines, "Machine label")
+    engine = _metadata_value(lines, "Engine")
+    if engine == "-":
+        # Older reports have no Engine field; infer from the filename prefix.
+        match = _REPORT_RE.match(os.path.basename(path))
+        engine = match.group(1) if match else "ollama"
     return BenchmarkReport(
         path=path,
+        engine=engine,
         started=_metadata_value(lines, "Started"),
         machine_label=machine_label if machine_label != "-" else os.path.basename(os.path.dirname(path)),
         platform=_metadata_value(lines, "Platform"),
@@ -136,7 +180,7 @@ def _latest_report_paths(reports_dir: str) -> List[str]:
         for filename in os.listdir(machine_dir):
             match = _REPORT_RE.match(filename)
             if match:
-                candidates.append((match.group(1), os.path.join(machine_dir, filename)))
+                candidates.append((match.group(2), os.path.join(machine_dir, filename)))
         if candidates:
             latest.append(max(candidates, key=lambda item: item[0]))
 
@@ -176,23 +220,26 @@ def _render_report(reports: List[BenchmarkReport]) -> str:
     common_models = sorted(set.intersection(*(set(r.models) for r in reports)))
     all_models = sorted(set.union(*(set(r.models) for r in reports)))
 
+    engines = sorted({r.engine for r in reports})
+
     lines: List[str] = []
-    lines.append("# Ollama Benchmark Comparison")
+    lines.append("# Local LLM Benchmark Comparison")
     lines.append("")
     lines.append(f"- Generated: `{now}`")
+    lines.append(f"- Engines: `{', '.join(engines)}`")
     lines.append(f"- Compared machines: `{', '.join(machines)}`")
-    lines.append(f"- Report selection: `latest ollama-bench-*.md from each reports/<machine>/ folder`")
+    lines.append(f"- Report selection: `latest (ollama|foundry)-bench-*.md from each reports/<machine>/ folder`")
     lines.append(f"- Common models: `{len(common_models)}`")
     lines.append("")
 
     lines.append("## Source Reports")
     lines.append("")
-    lines.append("| Machine | Platform | Started | Report |")
-    lines.append("|---|---|---|---|")
+    lines.append("| Machine | Engine | Platform | Started | Report |")
+    lines.append("|---|---|---|---|---|")
     for report in reports:
         rel = _relative_path(report.path, _repo_root())
         lines.append(
-            f"| {_md_escape(report.machine_label)} | {_md_escape(report.platform)} | `{_md_escape(report.started)}` | `{_md_escape(rel)}` |"
+            f"| {_md_escape(report.machine_label)} | {_md_escape(report.engine)} | {_md_escape(report.platform)} | `{_md_escape(report.started)}` | `{_md_escape(rel)}` |"
         )
     lines.append("")
 
@@ -253,6 +300,34 @@ def _render_report(reports: List[BenchmarkReport]) -> str:
             row.append(_fmt_float(report.models[model].wall_s_mean))
         lines.append("| " + " | ".join(row) + " |")
     lines.append("")
+
+    if any(report.models[m].ttft_ms_mean is not None for report in reports for m in common_models):
+        lines.append("## Time To First Token (ms, mean)")
+        lines.append("")
+        lines.append("Lower is better. `-` means the report predates TTFT measurement.")
+        lines.append("")
+        lines.append("| " + " | ".join(_md_escape(h) for h in header) + " |")
+        lines.append("|---" + "|---:" * len(reports) + "|")
+        for model in common_models:
+            row = [_md_escape(model)]
+            for report in reports:
+                row.append(_fmt_float(report.models[model].ttft_ms_mean, 1))
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
+
+    if any(report.models[m].eff_bw_mean is not None for report in reports for m in common_models):
+        lines.append("## Effective Memory Bandwidth (GB/s, mean)")
+        lines.append("")
+        lines.append("Estimated achieved decode bandwidth (model_size x gen tok/s); higher is better.")
+        lines.append("")
+        lines.append("| " + " | ".join(_md_escape(h) for h in header) + " |")
+        lines.append("|---" + "|---:" * len(reports) + "|")
+        for model in common_models:
+            row = [_md_escape(model)]
+            for report in reports:
+                row.append(_fmt_float(report.models[model].eff_bw_mean, 1))
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
 
     missing = sorted(set(all_models) - set(common_models))
     if missing:
