@@ -283,6 +283,42 @@ def read_json_file(path: str) -> Dict[str, Any]:
     return data
 
 
+# ---------------------------------------------------------------------------
+# Live run status (so the dashboard can show "analysis running")
+# ---------------------------------------------------------------------------
+
+# A tiny heartbeat file the benchmark writes while running. The dashboard server
+# reads it (read-only) and the web UI shows a running banner. It lives in the
+# reports dir so it travels with the same read-only bind mount the dashboard uses.
+BENCH_STATUS_FILE = ".bench-status.json"
+
+
+def bench_status_path(reports_dir: str) -> str:
+    return os.path.join(reports_dir, BENCH_STATUS_FILE)
+
+
+def write_bench_status(reports_dir: str, status: Dict[str, Any]) -> None:
+    """Atomically write the run heartbeat; best-effort, never raises."""
+    try:
+        ensure_dir(reports_dir)
+        payload = dict(status)
+        payload["updated"] = iso_now_local()
+        target = bench_status_path(reports_dir)
+        tmp = f"{target}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(tmp, target)  # atomic, so the reader never sees a partial file
+    except Exception:
+        pass
+
+
+def clear_bench_status(reports_dir: str) -> None:
+    try:
+        os.remove(bench_status_path(reports_dir))
+    except OSError:
+        pass
+
+
 def http_json(
     url: str,
     method: str = "GET",

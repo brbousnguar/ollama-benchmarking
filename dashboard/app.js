@@ -440,4 +440,37 @@ document.getElementById("sort-toggle").addEventListener("click", (e) => {
 
 function showFatal(e) { setStatus("is-error", "error: " + e.message); }
 
+/* ----------------------------------------------- live "analysis running" */
+let wasRunning = false;
+async function pollStatus() {
+  let s;
+  try { s = await getJSON("/api/status"); } catch { return; }
+  // A crashed run could leave a stale heartbeat; treat >3 min old as finished.
+  const stale = s.updated && (Date.now() - Date.parse(s.updated)) > 180000;
+  const running = !!s.running && !stale;
+  const banner = document.getElementById("run-banner");
+
+  if (running) {
+    const cur = s.current || "…";
+    const phase = s.phase === "warmup" ? ' <span class="ph">(warmup)</span>' : "";
+    document.getElementById("rb-text").innerHTML = `Analysis running · <b>${cur}</b>${phase}`;
+    const done = s.completed || 0, total = s.total || 0;
+    document.getElementById("rb-count").textContent = total ? `${done} / ${total} models` : "";
+    document.getElementById("rb-progress-fill").style.width = total ? `${(done / total) * 100}%` : "8%";
+    banner.hidden = false;
+    setStatus("is-live", `running · ${cur}`);
+  } else {
+    banner.hidden = true;
+  }
+
+  // When a run just finished, refresh the list so the new report shows up.
+  if (wasRunning && !running) {
+    setStatus("is-live", "run complete — refreshing…");
+    loadRuns().catch(() => {});
+  }
+  wasRunning = running;
+}
+
 loadRuns().catch(showFatal);
+pollStatus();
+setInterval(pollStatus, 4000);

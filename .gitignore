@@ -1,3 +1,7 @@
 .venv/
 __pycache__/
 *.py[cod]
+
+# Live benchmark heartbeat written by ollama_bench.py; runtime-only.
+reports/.bench-status.json
+reports/.bench-status.json.tmp

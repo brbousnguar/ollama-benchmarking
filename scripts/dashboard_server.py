@@ -204,6 +204,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._api_run(query)
         if route == "/api/compare":
             return self._api_compare()
+        if route == "/api/status":
+            return self._api_status()
         return self._send_error_json(404, f"Not found: {route}")
 
     def _serve_static(self, filename: str, content_type: str) -> None:
@@ -242,6 +244,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         for r in reports:
             r.pop("raw", None)
         self._send_json({"reports": reports})
+
+    def _api_status(self) -> None:
+        """Report whether a benchmark is currently running (heartbeat file)."""
+        path = os.path.join(self.reports_dir, bc.BENCH_STATUS_FILE)
+        if not os.path.isfile(path):
+            return self._send_json({"running": False})
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return self._send_json({"running": False})
+        data["running"] = bool(data.get("running"))
+        self._send_json(data)
 
 
 # ---------------------------------------------------------------------------

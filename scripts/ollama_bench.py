@@ -337,9 +337,31 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     all_results: Dict[str, List[bc.RunResult]] = {m: [] for m in models}
 
+    # Heartbeat file so the dashboard can show an "analysis running" banner.
+    status_dir = os.path.join(bc.repo_root(), "reports")
+    run_status: Dict[str, Any] = {
+        "running": True,
+        "engine": "ollama",
+        "machine_label": machine_label,
+        "started": started_at,
+        "pid": os.getpid(),
+        "models": models,
+        "total": len(models),
+        "completed": 0,
+        "current": models[0] if models else None,
+        "phase": "warmup" if args.warmup > 0 else "measure",
+    }
+
+    def push_status(**changes: Any) -> None:
+        run_status.update(changes)
+        bc.write_bench_status(status_dir, run_status)
+
+    push_status()
+
     if args.warmup > 0:
         bc.log("Starting warmup phase")
         for model in models:
+            push_status(current=model, phase="warmup")
             bc.log(f"Starting warmup for model {model}")
             model_warmup_t0 = time.perf_counter()
             for i in range(args.warmup):
@@ -356,7 +378,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             bc.log(f"Completed warmup for model {model} in {bc.fmt_duration(time.perf_counter() - model_warmup_t0)}")
 
     bc.log("Starting measured benchmark phase")
-    for model in models:
+    for model_index, model in enumerate(models):
+        push_status(current=model, phase="measure")
         bc.log(f"Starting model {model}")
         model_t0 = time.perf_counter()
         for i in range(args.runs):
@@ -382,8 +405,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"Completed model {model} in {bc.fmt_duration(model_elapsed)} "
             f"({agg['ok_runs']}/{agg['runs']} ok, mean gen tok/s: {bc.fmt_float(agg['gen_tps_mean'], 2)})"
         )
+        push_status(completed=model_index + 1)
 
     resource_snapshots.append(bc.get_resource_snapshot("end"))
+
+    # Benchmarks are done; drop the heartbeat so the dashboard clears its banner.
+    bc.clear_bench_status(status_dir)
 
     bc.log("Rendering markdown report")
     report = bc.render_report(
