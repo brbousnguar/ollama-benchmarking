@@ -101,6 +101,39 @@ By default, reports are grouped by an engine-prefixed anonymized machine label u
 created before the engine prefix remain under their original `reports/<machine>/`
 folders and are still picked up by the comparison.)
 
+## Agentic tool-use eval (capability, not speed)
+
+Script: `scripts/eval_agentic.py`
+
+Suite: `evals/agentic-tools.json`
+
+The benchmark scripts measure *speed*; this measures *capability* — can a model use
+tools correctly? Each task gives the model real tool schemas via Ollama's tools API
+(`/api/chat`) and the result is graded **deterministically and locally** (no
+frontier-model judge, fully offline) across three agentic skills:
+
+- **tool_selection** — pick the right tool when several are offered;
+- **arg_extraction** — fill the arguments correctly (including conversions, e.g.
+  "5 minutes" → `duration_seconds: 300`);
+- **abstention** — do *not* call a tool when none applies (e.g. a greeting or simple
+  arithmetic), which catches over-triggering.
+
+```bash
+python3 scripts/eval_agentic.py --models granite4.1:8b,qwen3:30b,gemma4:12b-mlx
+```
+
+Model selection is `--models` (installed models only; missing ones are skipped with a
+warning) or auto-discovery of local models when omitted. Grading uses `temperature 0`
+and a fixed seed for repeatability. The report is written to
+`reports/<machine>/eval-agentic-<timestamp>.md` with a per-model summary (overall %,
+tool-select %, arg %, abstention %, mean latency) and a per-task pass/fail breakdown.
+
+Arg matchers in the suite are `equals`, `contains`, `one_of`, `regex`, `numeric`
+(with optional `tol`), and `optional`; string matching is case-insensitive. Add your
+own tasks by editing `evals/agentic-tools.json`. A small local suite is an *indicative
+relative ranking across your models*, not a reproduction of published tool-calling
+leaderboards.
+
 ## Foundry Local benchmark
 
 Script: `scripts/foundry_bench.py`
