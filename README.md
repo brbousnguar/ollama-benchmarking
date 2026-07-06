@@ -166,6 +166,34 @@ The bandwidth-utilization chart draws a dashed line at the 100% "dense ceiling";
 past it (drawn amber) are Mixture-of-Experts / elastic models that stream only their
 active params, exactly as the report note describes.
 
+### Run the dashboard in Docker (benchmarks stay native)
+
+The dashboard is a read-only HTTP server, so it can run in a container while the
+**benchmarks keep running natively on the host** — which they must, since they need
+MLX/Metal on Apple Silicon (or the host GPU) and a host inference engine that a Linux
+container cannot reach. The split is:
+
+```
+native host:  ollama_bench.py  ──writes──▶  reports/  ◀──reads (read-only)──  Docker: dashboard
+```
+
+Start just the dashboard:
+
+```bash
+docker compose up -d --build
+```
+
+`docker-compose.yml` builds the dashboard image, publishes `8680`, and bind-mounts
+`./reports` read-only, so:
+
+- run `python3 scripts/ollama_bench.py …` on the host as usual (never in the container);
+- new reports land in `reports/` and appear in the dashboard on refresh — no restart,
+  because the mount is live and the server re-scans on every request;
+- `restart: unless-stopped` brings the dashboard back after a reboot.
+
+The container serves data unauthenticated; to expose it only to the host, change the
+port mapping to `"127.0.0.1:8680:8680"`. Stop it with `docker compose down`.
+
 ## Compare machines
 
 Script: `scripts/compare_latest_reports.py`
