@@ -1,0 +1,192 @@
+{
+  "_comment": "Local, deterministic tool-use (agentic) eval suite. Each task gives the model one or more tool schemas via Ollama's tools API and grades the tool call it returns. Categories: tool_selection (pick the right tool among several), arg_extraction (fill arguments correctly), abstention (do NOT call a tool when none applies). Arg matchers: equals | contains | one_of | regex | numeric (with optional 'tol') | optional. String matching is case-insensitive.",
+  "tools": {
+    "get_weather": {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string", "description": "City and country, e.g. 'Paris, France'." },
+            "unit": { "type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temperature unit." }
+          },
+          "required": ["location"]
+        }
+      }
+    },
+    "send_email": {
+      "type": "function",
+      "function": {
+        "name": "send_email",
+        "description": "Send an email to a recipient.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "to": { "type": "string", "description": "Recipient email address." },
+            "cc": { "type": "string", "description": "CC email address." },
+            "subject": { "type": "string" },
+            "body": { "type": "string" }
+          },
+          "required": ["to", "subject"]
+        }
+      }
+    },
+    "create_calendar_event": {
+      "type": "function",
+      "function": {
+        "name": "create_calendar_event",
+        "description": "Create a calendar event.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "date": { "type": "string", "description": "Date, e.g. '2026-07-07' or 'tomorrow'." },
+            "time": { "type": "string", "description": "Start time, e.g. '09:00'." },
+            "duration_minutes": { "type": "integer" }
+          },
+          "required": ["title", "date"]
+        }
+      }
+    },
+    "search_web": {
+      "type": "function",
+      "function": {
+        "name": "search_web",
+        "description": "Search the web for information.",
+        "parameters": {
+          "type": "object",
+          "properties": { "query": { "type": "string" } },
+          "required": ["query"]
+        }
+      }
+    },
+    "convert_currency": {
+      "type": "function",
+      "function": {
+        "name": "convert_currency",
+        "description": "Convert an amount from one currency to another.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "amount": { "type": "number" },
+            "from_currency": { "type": "string", "description": "ISO currency code, e.g. USD." },
+            "to_currency": { "type": "string", "description": "ISO currency code, e.g. EUR." }
+          },
+          "required": ["amount", "from_currency", "to_currency"]
+        }
+      }
+    },
+    "set_timer": {
+      "type": "function",
+      "function": {
+        "name": "set_timer",
+        "description": "Set a countdown timer.",
+        "parameters": {
+          "type": "object",
+          "properties": { "duration_seconds": { "type": "integer" } },
+          "required": ["duration_seconds"]
+        }
+      }
+    },
+    "get_stock_price": {
+      "type": "function",
+      "function": {
+        "name": "get_stock_price",
+        "description": "Get the latest stock price for a ticker symbol.",
+        "parameters": {
+          "type": "object",
+          "properties": { "ticker": { "type": "string", "description": "Ticker symbol, e.g. AAPL." } },
+          "required": ["ticker"]
+        }
+      }
+    }
+  },
+  "tasks": [
+    {
+      "id": "weather-paris",
+      "category": "arg_extraction",
+      "prompt": "What's the weather like in Paris, France right now?",
+      "tools": ["get_weather"],
+      "expect": { "call": true, "tool": "get_weather", "args": { "location": { "contains": "paris" } } }
+    },
+    {
+      "id": "weather-tokyo-fahrenheit",
+      "category": "arg_extraction",
+      "prompt": "Give me the current temperature in Tokyo in Fahrenheit.",
+      "tools": ["get_weather"],
+      "expect": { "call": true, "tool": "get_weather", "args": { "location": { "contains": "tokyo" }, "unit": { "one_of": ["fahrenheit", "f"] } } }
+    },
+    {
+      "id": "email-lunch",
+      "category": "arg_extraction",
+      "prompt": "Send an email to john@acme.com with the subject 'Lunch' and tell him let's meet at noon.",
+      "tools": ["send_email"],
+      "expect": { "call": true, "tool": "send_email", "args": { "to": { "contains": "john@acme.com" }, "subject": { "contains": "lunch" } } }
+    },
+    {
+      "id": "calendar-standup",
+      "category": "arg_extraction",
+      "prompt": "Schedule a meeting titled 'Standup' for tomorrow at 9am that lasts 30 minutes.",
+      "tools": ["create_calendar_event"],
+      "expect": { "call": true, "tool": "create_calendar_event", "args": { "title": { "contains": "standup" }, "duration_minutes": { "numeric": 30 } } }
+    },
+    {
+      "id": "currency-usd-eur",
+      "category": "arg_extraction",
+      "prompt": "Convert 100 US dollars to euros.",
+      "tools": ["convert_currency"],
+      "expect": { "call": true, "tool": "convert_currency", "args": { "amount": { "numeric": 100 }, "from_currency": { "one_of": ["usd", "us dollars", "dollars", "us dollar"] }, "to_currency": { "one_of": ["eur", "euros", "euro"] } } }
+    },
+    {
+      "id": "timer-5min",
+      "category": "arg_extraction",
+      "prompt": "Set a timer for 5 minutes.",
+      "tools": ["set_timer"],
+      "expect": { "call": true, "tool": "set_timer", "args": { "duration_seconds": { "numeric": 300 } } }
+    },
+    {
+      "id": "select-weather",
+      "category": "tool_selection",
+      "prompt": "Is it going to rain in Berlin today?",
+      "tools": ["get_weather", "send_email", "search_web"],
+      "expect": { "call": true, "tool": "get_weather", "args": { "location": { "contains": "berlin" } } }
+    },
+    {
+      "id": "select-stock",
+      "category": "tool_selection",
+      "prompt": "What is Apple's current stock price?",
+      "tools": ["get_stock_price", "get_weather", "search_web"],
+      "expect": { "call": true, "tool": "get_stock_price", "args": { "ticker": { "one_of": ["aapl", "apple"] } } }
+    },
+    {
+      "id": "select-search",
+      "category": "tool_selection",
+      "prompt": "Find me the latest news about the Mars rover.",
+      "tools": ["search_web", "get_weather", "send_email"],
+      "expect": { "call": true, "tool": "search_web", "args": { "query": { "contains": "mars" } } }
+    },
+    {
+      "id": "abstain-greeting",
+      "category": "abstention",
+      "prompt": "Hi there! How are you doing today?",
+      "tools": ["get_weather", "send_email"],
+      "expect": { "call": false }
+    },
+    {
+      "id": "abstain-math",
+      "category": "abstention",
+      "prompt": "What is 17 plus 25? Just tell me the number.",
+      "tools": ["get_weather", "get_stock_price"],
+      "expect": { "call": false }
+    },
+    {
+      "id": "email-cc-deadline",
+      "category": "arg_extraction",
+      "prompt": "Email team@x.com and cc boss@x.com with the subject 'Q3 report' reminding them the deadline is Friday.",
+      "tools": ["send_email"],
+      "expect": { "call": true, "tool": "send_email", "args": { "to": { "contains": "team@x.com" }, "cc": { "contains": "boss@x.com", "optional": true }, "subject": { "contains": "q3" } } }
+    }
+  ]
+}
