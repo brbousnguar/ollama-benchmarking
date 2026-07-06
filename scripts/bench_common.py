@@ -232,6 +232,35 @@ def effective_bandwidth_gbps(model_size_bytes: Optional[float], gen_tok_s: Optio
     return (model_size_bytes * gen_tok_s) / 1_000_000_000.0
 
 
+def bandwidth_utilization_pct(
+    eff_bw_gbps: Optional[float], theoretical_bw_gbps: Optional[float]
+) -> Optional[float]:
+    """Achieved decode bandwidth as a percentage of the theoretical ceiling.
+
+    This is the headline efficiency KPI for local LLM inference: decode is
+    memory-bandwidth bound, so how close a run gets to the machine's theoretical
+    bandwidth says how well the engine/quant/model combination uses the silicon.
+    """
+    if eff_bw_gbps is None or not theoretical_bw_gbps:
+        return None
+    return (eff_bw_gbps / theoretical_bw_gbps) * 100.0
+
+
+def tokens_per_s_per_gb(gen_tok_s: Optional[float], model_size_bytes: Optional[float]) -> Optional[float]:
+    """Decode throughput normalized by model footprint (tokens/s per GiB).
+
+    Lets small and large models be compared on efficiency-per-byte rather than
+    raw speed, which raw tok/s hides (a 4B model is always faster in absolute
+    terms; this shows which model does the most work per GB resident in memory).
+    """
+    if gen_tok_s is None or not model_size_bytes:
+        return None
+    size_gib = model_size_bytes / (1024 ** 3)
+    if size_gib == 0:
+        return None
+    return gen_tok_s / size_gib
+
+
 # ---------------------------------------------------------------------------
 # Files / HTTP
 # ---------------------------------------------------------------------------
@@ -827,6 +856,40 @@ def _get_windows_npu() -> Optional[Dict[str, Any]]:
     return {"present": True, "name": sorted(set(names))[0]}
 
 
+# Nominal unified-memory bandwidth (GB/s) per Apple Silicon variant. Apple does
+# not expose this via sysctl, but decode is bandwidth-bound so it is the key
+# denominator for the bandwidth-utilization KPI. Values are the published
+# figures per chip tier; match the most specific (Ultra/Max/Pro) label first.
+_APPLE_SILICON_BANDWIDTH_GBPS = [
+    ("m1 ultra", 800.0),
+    ("m1 max", 400.0),
+    ("m1 pro", 200.0),
+    ("m1", 68.25),
+    ("m2 ultra", 800.0),
+    ("m2 max", 400.0),
+    ("m2 pro", 200.0),
+    ("m2", 100.0),
+    ("m3 ultra", 800.0),
+    ("m3 max", 400.0),
+    ("m3 pro", 150.0),
+    ("m3", 100.0),
+    ("m4 max", 546.0),
+    ("m4 pro", 273.0),
+    ("m4", 120.0),
+]
+
+
+def _apple_silicon_bandwidth_gbps(brand_string: Optional[str]) -> Optional[float]:
+    if not brand_string:
+        return None
+    text = brand_string.lower()
+    # Longest / most specific labels first so "m4 pro" wins over "m4".
+    for label, gbps in sorted(_APPLE_SILICON_BANDWIDTH_GBPS, key=lambda kv: -len(kv[0])):
+        if label in text:
+            return gbps
+    return None
+
+
 def _get_macos_memory_type() -> Optional[Dict[str, Any]]:
     out = run_command(["system_profiler", "SPMemoryDataType"], timeout_s=10.0)
     mem_type = None
@@ -838,11 +901,15 @@ def _get_macos_memory_type() -> Optional[Dict[str, Any]]:
                 mem_type = stripped.split(":", 1)[1].strip()
             elif stripped.startswith("Speed:") and speed is None:
                 speed = stripped.split(":", 1)[1].strip()
-    # Apple Silicon reports unified memory; type/speed often absent.
+    # Apple Silicon reports unified memory; type/speed often absent. Bandwidth is
+    # looked up from the chip name so the utilization KPI works on Macs too.
+    brand = _get_sysctl_value("machdep.cpu.brand_string")
+    theoretical_bw = _apple_silicon_bandwidth_gbps(brand)
     return {
         "type": mem_type or "unified",
         "speed_label": speed,
         "unified": True,
+        "theoretical_bandwidth_gbps": theoretical_bw,
     }
 
 
@@ -1336,17 +1403,30 @@ def render_report(
     lines.append("## Summary")
     lines.append("")
     lines.append(
-        "Eff. mem BW (GB/s) ~= model_size x gen tok/s, an estimate of achieved memory bandwidth during decode"
-        + (f" (theoretical ~{fmt_float(theoretical_bw, 1)} GB/s)." if theoretical_bw else ".")
+        "KPIs: **Gen tok/s** (decode throughput), **Prompt tok/s** (prefill), **TTFT** "
+        "(time to first token), **Eff BW** (achieved decode bandwidth ~= model_size x gen tok/s), "
+        "**BW util %** (Eff BW as a share of the machine's theoretical memory bandwidth"
+        + (f", ~{fmt_float(theoretical_bw, 1)} GB/s here" if theoretical_bw else "")
+        + ") and **Tok/s/GB** (throughput per GiB of model resident in memory). BW util % and "
+        "Tok/s/GB are the efficiency metrics; higher is better."
     )
     lines.append("")
     lines.append(
-        "| Model | OK/Total | Gen tok/s (mean) | Gen tok/s (p50) | Gen tok/s (p90) | Gen tok/s (stdev) | Prompt tok/s (mean) | TTFT ms (mean) | Eff BW GB/s (mean) | Total s (mean) | Wall s (mean) |"
+        "> Note: Eff BW and BW util assume *dense* weight streaming (all weights read once per "
+        "token). Mixture-of-Experts / elastic models (e.g. `*-a3b`, `gpt-oss`, `nemotron-*-nano`, "
+        "`gemma4:e4b`) stream only their active parameters, so their Eff BW and BW util are "
+        "overestimated and can exceed 100% — a useful signal that the model is sparse rather than dense."
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("")
+    lines.append(
+        "| Model | OK/Total | Gen tok/s (mean) | Gen tok/s (p50) | Gen tok/s (p90) | Gen tok/s (stdev) | Prompt tok/s (mean) | TTFT ms (mean) | Eff BW GB/s (mean) | BW util % (mean) | Tok/s/GB (mean) | Total s (mean) | Wall s (mean) |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for model in models:
         agg = aggregate(all_results.get(model, []))
         eff_bw = effective_bandwidth_gbps(model_sizes.get(model), agg["gen_tps_mean"])
+        bw_util = bandwidth_utilization_pct(eff_bw, theoretical_bw)
+        toks_per_gb = tokens_per_s_per_gb(agg["gen_tps_mean"], model_sizes.get(model))
         lines.append(
             "| "
             + " | ".join(
@@ -1360,6 +1440,8 @@ def render_report(
                     fmt_float(agg["prompt_tps_mean"], 2),
                     fmt_float(agg["ttft_ms_mean"], 1),
                     fmt_float(eff_bw, 1),
+                    fmt_float(bw_util, 1),
+                    fmt_float(toks_per_gb, 2),
                     fmt_float(agg["total_s_mean"], 2),
                     fmt_float(agg["wall_s_mean"], 2),
                 ]

@@ -1,0 +1,10 @@
+{
+  "_comment": "Apple Silicon MLX set. These *-mlx tags use Ollama's MLX backend (Ollama 0.31+) and run only on Apple Silicon Macs; on Apple hardware MLX is materially faster than the GGUF/Metal path (e.g. Gemma 4 gains multi-token prediction). Run with: python3 scripts/ollama_bench.py --config ollama-bench-mac-mlx.json",
+  "models": [
+    "gemma4:e4b-mlx",
+    "gemma4:12b-mlx",
+    "gemma4:26b-mlx",
+    "qwen3.5:9b-mlx-bf16",
+    "qwen3.6:35b-mlx"
+  ]
+}
