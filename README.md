@@ -69,15 +69,14 @@ Two curated model sets ship with the repo:
 
   Comparing the two configs on the same Mac shows the MLX vs GGUF speedup directly.
 
-Larger local models (e.g. `nemotron-3-nano:30b`, `llama3.3:70b`) are left out of the
-defaults so smaller machines don't auto-pull them; benchmark them ad hoc with
-`--models nemotron-3-nano:30b`.
+Larger local models (e.g. `nemotron-3-nano:30b`, `llama3.3:70b`) are benchmarked
+only when they are already installed locally.
 
 ## Ollama benchmark
 
 Script: `scripts/ollama_bench.py`
 
-Default config: `ollama-bench.json`
+Default model selection: discover installed local models from Ollama `/api/tags`
 
 Benchmarks one or more local Ollama models via the HTTP API (streaming so TTFT can
 be measured) and writes a Markdown report including:
@@ -90,8 +89,8 @@ be measured) and writes a Markdown report including:
 - Observed resource samples around benchmark runs: peak CPU/RAM and NVIDIA GPU/VRAM metrics when `nvidia-smi` is available
 - Verbose console progress logs for discovery, warmup, each measured run, report writing, and total session time
 - Local-only model selection by default; Ollama cloud models are skipped unless `--include-cloud` is provided
-- Model selection order: `--models`, then `ollama-bench.json`, then Ollama auto-discovery
-- Missing selected models are pulled automatically with `ollama pull <model>`
+- Model selection order: `--models`, then explicit `--config`, then Ollama auto-discovery
+- Missing selected models are skipped; the benchmark never downloads or pulls models
 - Reports use an anonymized machine label instead of personal identifiers such as username, computer name, exact local paths, or exact hardware model names
 
 By default, reports are grouped by an engine-prefixed anonymized machine label under
@@ -161,7 +160,9 @@ python3 scripts/compare_latest_reports.py --out reports/comparisons/latest.md
 
 The script automatically creates and uses a local `.venv` on first run. It has no third-party Python dependencies, so the venv is only used to keep execution isolated and consistent across machines.
 
-If `ollama-bench.json` exists, the script uses the `models` array from that file by default. Example:
+By default, the script discovers models that are already installed in the local Ollama instance via `/api/tags`. It does not download or pull models.
+
+To benchmark a fixed subset, pass `--models` or an explicit config file. Any requested model that is not already installed locally is skipped. Example config:
 
 ```json
 {
@@ -207,6 +208,8 @@ Use a different config file:
 ```bash
 python3 scripts/ollama_bench.py --config my-models.json
 ```
+
+The benchmark never runs `ollama pull`; install models yourself before running if you want them included.
 
 Cloud models are skipped by default, including names such as `kimi-k2.6:cloud` or `gpt-oss:20b-cloud`. To include them:
 

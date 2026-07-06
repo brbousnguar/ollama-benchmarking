@@ -6,9 +6,10 @@ Requires:
   - Python 3.8+
   - Ollama running locally (default: http://localhost:11434)
 
-This script uses /api/tags to discover models (unless --models is provided)
-and /api/generate (stream=true) to collect server-side timing counters plus a
-client-side time-to-first-token (TTFT) measurement.
+This script uses /api/tags to discover locally installed models (unless
+--models or --config is provided) and /api/generate (stream=true) to collect
+server-side timing counters plus a client-side time-to-first-token (TTFT)
+measurement. It never downloads or pulls models.
 
 Shared metadata/hardware collection and report rendering live in bench_common.
 """
@@ -19,7 +20,6 @@ import argparse
 import datetime as _dt
 import json
 import os
-import shutil
 import sys
 import time
 import urllib.error
@@ -28,9 +28,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench_common as bc  # noqa: E402
-
-_DEFAULT_CONFIG_PATH = os.path.join(bc.repo_root(), "ollama-bench.json")
-
 
 def _is_cloud_model(model: str) -> bool:
     return "cloud" in model.lower()
@@ -76,17 +73,22 @@ def _ensure_models_available(host: str, models: List[str], timeout_s: float) -> 
     if not missing:
         bc.log("All selected models are already available locally")
         return
-    if shutil.which("ollama") is None:
-        raise RuntimeError("Some models are missing locally and the 'ollama' CLI was not found in PATH.")
+    raise RuntimeError(
+        "Selected model(s) are not installed locally and will not be downloaded: "
+        + ", ".join(missing)
+    )
 
-    for model in missing:
-        bc.log(f"Model {model} not found locally; pulling with `ollama pull {model}`")
-        t0 = time.perf_counter()
-        rc, output = bc.run_streaming_command(["ollama", "pull", model])
-        if rc != 0:
-            detail = output.strip().splitlines()[-1] if output.strip() else "see Ollama output above"
-            raise RuntimeError(f"`ollama pull {model}` failed with exit code {rc}: {detail}")
-        bc.log(f"Completed pull for {model} in {bc.fmt_duration(time.perf_counter() - t0)}")
+
+def _filter_installed_models(host: str, models: List[str], timeout_s: float, source: str) -> List[str]:
+    installed = set(_list_ollama_models(host, timeout_s))
+    present = [m for m in models if m in installed]
+    missing = [m for m in models if m not in installed]
+    if missing:
+        bc.log(
+            f"Skipping {len(missing)} model(s) from {source} because they are not installed locally: "
+            + ", ".join(missing)
+        )
+    return present
 
 
 def _generate_once(
@@ -211,8 +213,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Benchmark local Ollama models and write a Markdown report.")
     p.add_argument("--no-venv", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--host", default="http://localhost:11434", help="Ollama host (default: http://localhost:11434)")
-    p.add_argument("--config", default=_DEFAULT_CONFIG_PATH, help=f"Config JSON path (default: {_DEFAULT_CONFIG_PATH})")
-    p.add_argument("--models", default=None, help="Comma-separated models. If omitted, auto-discover via /api/tags")
+    p.add_argument("--config", default=None, help="Optional config JSON path with a 'models' array")
+    p.add_argument("--models", default=None, help="Comma-separated installed models. If omitted, auto-discover via /api/tags")
     p.add_argument("--include-cloud", action="store_true", help="Include Ollama cloud models. By default models with 'cloud' in the name are skipped.")
     p.add_argument("--runs", type=int, default=3, help="Measured runs per model (default: 3)")
     p.add_argument("--warmup", type=int, default=1, help="Warmup runs per model, not included in summary (default: 1)")
@@ -251,7 +253,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     bc.log("Collecting richer hardware detail (memory/CPU/GPU/NPU)")
     hardware = bc.get_hardware_detail(pc_metadata)
 
-    config_models = _load_config_models(args.config)
+    config_models = _load_config_models(args.config) if args.config else None
     if config_models is not None:
         bc.log(f"Loaded config file: {args.config}")
 
@@ -275,10 +277,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 bc.log(f"Skipping {len(skipped_cloud)} cloud model(s) from {model_source}: {', '.join(skipped_cloud)}")
             if not models:
                 raise SystemExit("Only cloud models were selected. Re-run with --include-cloud to benchmark them.")
-        bc.log(f"Using {len(models)} model(s) from {model_source}: {', '.join(models)}")
+        models = _filter_installed_models(host, models, args.timeout_s, model_source)
+        bc.log(f"Using {len(models)} installed model(s) from {model_source}: {', '.join(models)}")
 
     if not models:
-        raise SystemExit("No models selected. Add models to the config file, pass --models, or let the script auto-discover models.")
+        raise SystemExit("No installed local models selected. Pull models manually first, then rerun the benchmark.")
 
     _ensure_models_available(host=host, models=models, timeout_s=args.timeout_s)
 
