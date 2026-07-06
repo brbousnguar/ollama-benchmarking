@@ -40,6 +40,38 @@ Beyond raw tokens/sec, the **Summary** adds:
 - **Effective memory bandwidth (GB/s)** — `model_size × gen tok/s`, an estimate of
   the bandwidth actually achieved during decode. Compare it against the theoretical
   ceiling to see how efficiently a machine is being used.
+- **Memory-bandwidth utilization (%)** — effective ÷ theoretical bandwidth. Since
+  decode is bandwidth-bound, this is the headline efficiency KPI: how close a run
+  gets to the silicon's ceiling. The theoretical ceiling is read from SMBIOS on
+  Windows and from a per-chip lookup on Apple Silicon (e.g. M4 Pro ≈ 273 GB/s), so
+  the KPI is populated on Macs too. It assumes *dense* weight streaming, so
+  Mixture-of-Experts / elastic models (which stream only active params per token)
+  can read above 100% — a useful signal that a model is sparse rather than dense.
+- **Throughput per GB (tok/s per GiB)** — decode throughput normalized by the
+  model's resident footprint, so small and large models can be compared on
+  efficiency-per-byte rather than raw speed.
+
+## Model configs
+
+Two curated model sets ship with the repo:
+
+- **`ollama-bench.json`** (default) — a cross-platform, current-generation set of
+  GGUF models spanning 4B–30B (`qwen3`, `granite4.1`, `deepseek-r1`, `gpt-oss`,
+  `qwen3-coder`). These tags run on Windows, macOS and Linux.
+- **`ollama-bench-mac-mlx.json`** — Apple Silicon **MLX** builds (`gemma4:*-mlx`,
+  `qwen3.5:9b-mlx-bf16`, `qwen3.6:35b-mlx`). MLX tags require Ollama 0.31+ and run
+  only on Apple Silicon, where they are materially faster than the GGUF/Metal path
+  (e.g. Gemma 4 gains multi-token prediction). On a Mac, benchmark the MLX set with:
+
+  ```bash
+  python3 scripts/ollama_bench.py --config ollama-bench-mac-mlx.json
+  ```
+
+  Comparing the two configs on the same Mac shows the MLX vs GGUF speedup directly.
+
+Larger local models (e.g. `nemotron-3-nano:30b`, `llama3.3:70b`) are left out of the
+defaults so smaller machines don't auto-pull them; benchmark them ad hoc with
+`--models nemotron-3-nano:30b`.
 
 ## Ollama benchmark
 

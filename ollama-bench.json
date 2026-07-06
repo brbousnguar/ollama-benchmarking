@@ -1,12 +1,12 @@
 {
+  "_comment": "Cross-platform modern default set. These GGUF tags run on Windows, macOS and Linux and cover current-generation tool-calling / reasoning models from 4B to 30B. For Apple Silicon MLX builds use --config ollama-bench-mac-mlx.json. Larger local models (e.g. nemotron-3-nano:30b, llama3.3:70b) can be benchmarked ad hoc with --models.",
   "models": [
-    "gemma3:1b",
     "qwen3:4b",
     "qwen3:8b",
-    "qwen3:30b",
-    "gpt-oss:20b",
-    "phi4-mini",
+    "granite4.1:8b",
     "deepseek-r1:8b",
-    "mistral:7b"
+    "gpt-oss:20b",
+    "qwen3:30b",
+    "qwen3-coder:30b"
   ]
 }

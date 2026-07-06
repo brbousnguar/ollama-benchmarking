@@ -29,6 +29,8 @@ class ModelSummary:
     prompt_tps_mean: Optional[float]
     ttft_ms_mean: Optional[float]
     eff_bw_mean: Optional[float]
+    bw_util_mean: Optional[float]
+    toks_per_gb_mean: Optional[float]
     total_s_mean: Optional[float]
     wall_s_mean: Optional[float]
 
@@ -88,12 +90,15 @@ _COLUMN_FIELDS = {
     "prompt tok/s (mean)": "prompt_tps_mean",
     "ttft ms (mean)": "ttft_ms_mean",
     "eff bw gb/s (mean)": "eff_bw_mean",
+    "bw util % (mean)": "bw_util_mean",
+    "tok/s/gb (mean)": "toks_per_gb_mean",
     "total s (mean)": "total_s_mean",
     "wall s (mean)": "wall_s_mean",
 }
 _FLOAT_FIELDS = {
     "gen_tps_mean", "gen_tps_p50", "gen_tps_p90", "gen_tps_stdev",
-    "prompt_tps_mean", "ttft_ms_mean", "eff_bw_mean", "total_s_mean", "wall_s_mean",
+    "prompt_tps_mean", "ttft_ms_mean", "eff_bw_mean", "bw_util_mean",
+    "toks_per_gb_mean", "total_s_mean", "wall_s_mean",
 }
 
 
@@ -138,6 +143,8 @@ def _parse_summary(lines: List[str]) -> Dict[str, ModelSummary]:
             prompt_tps_mean=values.get("prompt_tps_mean"),
             ttft_ms_mean=values.get("ttft_ms_mean"),
             eff_bw_mean=values.get("eff_bw_mean"),
+            bw_util_mean=values.get("bw_util_mean"),
+            toks_per_gb_mean=values.get("toks_per_gb_mean"),
             total_s_mean=values.get("total_s_mean"),
             wall_s_mean=values.get("wall_s_mean"),
         )
@@ -326,6 +333,39 @@ def _render_report(reports: List[BenchmarkReport]) -> str:
             row = [_md_escape(model)]
             for report in reports:
                 row.append(_fmt_float(report.models[model].eff_bw_mean, 1))
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
+
+    if any(report.models[m].bw_util_mean is not None for report in reports for m in common_models):
+        lines.append("## Memory Bandwidth Utilization (%, mean)")
+        lines.append("")
+        lines.append(
+            "Achieved decode bandwidth as a share of each machine's theoretical memory "
+            "bandwidth; higher means the silicon is used more efficiently. `-` means the "
+            "theoretical bandwidth was unknown for that machine. Values assume dense weight "
+            "streaming, so Mixture-of-Experts / elastic models can exceed 100%."
+        )
+        lines.append("")
+        lines.append("| " + " | ".join(_md_escape(h) for h in header) + " |")
+        lines.append("|---" + "|---:" * len(reports) + "|")
+        for model in common_models:
+            row = [_md_escape(model)]
+            for report in reports:
+                row.append(_fmt_float(report.models[model].bw_util_mean, 1))
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
+
+    if any(report.models[m].toks_per_gb_mean is not None for report in reports for m in common_models):
+        lines.append("## Throughput per GB (tok/s/GiB, mean)")
+        lines.append("")
+        lines.append("Decode throughput normalized by model footprint; higher is better.")
+        lines.append("")
+        lines.append("| " + " | ".join(_md_escape(h) for h in header) + " |")
+        lines.append("|---" + "|---:" * len(reports) + "|")
+        for model in common_models:
+            row = [_md_escape(model)]
+            for report in reports:
+                row.append(_fmt_float(report.models[model].toks_per_gb_mean, 2))
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
 
