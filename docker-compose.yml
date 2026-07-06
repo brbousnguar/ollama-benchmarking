@@ -1,0 +1,20 @@
+# LAN dashboard for the benchmark reports.
+#
+#   docker compose up -d --build
+#
+# Then open http://<this-host-ip>:8680 from any device on the LAN. The reports
+# directory is mounted read-only: the dashboard never writes, and benchmarks keep
+# running natively on the host (they need MLX/Metal / the host inference engine).
+services:
+  dashboard:
+    build: .
+    image: benchlab-dashboard
+    container_name: benchlab-dashboard
+    ports:
+      - "8680:8680"
+    volumes:
+      - ./reports:/app/reports:ro
+    restart: unless-stopped
+    # Serves your benchmark data unauthenticated — run on trusted LANs only.
+    # To expose it only to this host instead of the whole LAN, change the port
+    # mapping to "127.0.0.1:8680:8680".

@@ -1,0 +1,11 @@
+# Keep the build context tiny — the image only needs scripts/ and dashboard/.
+.git
+.venv
+**/__pycache__
+**/*.py[cod]
+# Reports are bind-mounted at runtime, not baked into the image.
+reports
+foundry-bench.json
+ollama-bench.json
+ollama-bench-mac-mlx.json
+README.md
