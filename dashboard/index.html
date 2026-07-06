@@ -39,8 +39,14 @@
   <div class="app">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-head">
-        <span class="label">Runs</span>
-        <span class="count" id="run-count">—</span>
+        <div class="sh-row">
+          <span class="label">Runs</span>
+          <span class="count" id="run-count">—</span>
+        </div>
+        <div class="seg" id="sort-toggle" role="tablist" aria-label="Sort runs">
+          <button data-sort="date" class="on">Date</button>
+          <button data-sort="machine">Machine</button>
+        </div>
       </div>
       <div class="run-list" id="run-list"></div>
     </aside>

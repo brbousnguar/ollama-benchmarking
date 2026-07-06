@@ -15,6 +15,7 @@ const state = {
   activePath: null,
   view: "run",
   sort: { key: "gen_tps_mean", dir: -1 },
+  sidebarSort: "date", // "date" | "machine"
   lastReport: null,
 };
 
@@ -91,32 +92,44 @@ async function loadRuns() {
 }
 
 /* --------------------------------------------------------------- sidebar */
+function runItem(run, opts = {}) {
+  const color = colorFor(run.machine_label);
+  const sub = opts.showMachine
+    ? `${run.machine_label} · ${run.engine}`
+    : `${run.engine} · ${(run.models || []).length} models`;
+  return el("div", {
+    class: "run-item" + (run.path === state.activePath ? " is-active" : ""),
+    style: "position:relative",
+    "data-path": run.path,
+    onclick: () => selectRun(run.path),
+  }, [
+    opts.showMachine ? el("span", { class: "ri-dot", style: `background:${color};color:${color}` }) : null,
+    el("div", { class: "ri-main" }, [
+      el("div", { class: "ri-time" }, shortTime(run.started)),
+      el("div", { class: "ri-sub", title: sub }, sub),
+    ]),
+    run.is_latest ? el("span", { class: "badge-latest" }, "latest") : null,
+  ]);
+}
+
 function renderSidebar() {
   const list = document.getElementById("run-list");
   list.innerHTML = "";
+
+  if (state.sidebarSort === "date") {
+    // state.runs already arrives newest-first from the API.
+    const sorted = [...state.runs].sort((a, b) => String(b.started).localeCompare(String(a.started)));
+    for (const run of sorted) list.appendChild(runItem(run, { showMachine: true }));
+    return;
+  }
+
   const groups = {};
   for (const run of state.runs) (groups[run.machine_label] ||= []).push(run);
-
   for (const machine of Object.keys(groups).sort()) {
-    const color = colorFor(machine);
     const group = el("div", { class: "machine-group" }, [
-      el("div", { class: "machine-name", style: `--accent:${color}` }, machine),
+      el("div", { class: "machine-name", style: `--accent:${colorFor(machine)}` }, machine),
     ]);
-    for (const run of groups[machine]) {
-      const item = el("div", {
-        class: "run-item" + (run.path === state.activePath ? " is-active" : ""),
-        style: "position:relative",
-        "data-path": run.path,
-        onclick: () => selectRun(run.path),
-      }, [
-        el("div", { class: "ri-main" }, [
-          el("div", { class: "ri-time" }, shortTime(run.started)),
-          el("div", { class: "ri-sub" }, `${run.engine} · ${(run.models || []).length} models`),
-        ]),
-        run.is_latest ? el("span", { class: "badge-latest" }, "latest") : null,
-      ]);
-      group.appendChild(item);
-    }
+    for (const run of groups[machine]) group.appendChild(runItem(run));
     list.appendChild(group);
   }
 }
@@ -415,6 +428,15 @@ document.getElementById("tabs").addEventListener("click", (e) => {
   if (tab) switchView(tab.dataset.view);
 });
 document.getElementById("refresh").addEventListener("click", () => loadRuns().catch(showFatal));
+
+document.getElementById("sort-toggle").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-sort]");
+  if (!btn || btn.dataset.sort === state.sidebarSort) return;
+  state.sidebarSort = btn.dataset.sort;
+  document.querySelectorAll("#sort-toggle button").forEach((b) =>
+    b.classList.toggle("on", b.dataset.sort === state.sidebarSort));
+  renderSidebar();
+});
 
 function showFatal(e) { setStatus("is-error", "error: " + e.message); }
 
