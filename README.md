@@ -134,6 +134,66 @@ Reports are written to `reports/foundry-<machine-label>/foundry-bench-<timestamp
 Because macOS stays on Ollama in this project, the script exits on non-Windows hosts
 unless `--allow-non-windows` is passed.
 
+## Dashboard (LAN web UI)
+
+Script: `scripts/dashboard_server.py`
+
+The Markdown reports are ideal for version control but awkward to read and compare.
+The dashboard serves them as a modern web UI — a per-run view with hero KPI cards,
+animated bar charts (decode throughput, bandwidth utilization, throughput-per-GB,
+TTFT), a sortable summary table, and a cross-machine **Compare** view. It's standard
+library only (no install) and reads the existing `reports/` folder, so new benchmark
+runs appear on refresh with no rebuild.
+
+```bash
+python3 scripts/dashboard_server.py
+```
+
+By default it binds to `0.0.0.0:8680` and prints both a local and a LAN URL:
+
+```
+local:  http://localhost:8680
+LAN:    http://192.168.x.y:8680   <- open this on other devices
+```
+
+Open the LAN URL from any device on the network (e.g. serve from a Mac mini and read
+the reports from a laptop or phone). Change the port with `--port`, point at a
+different reports tree with `--reports-dir`, or bind only to localhost with
+`--host 127.0.0.1`. The server confines report reads to the reports directory, but it
+serves your benchmark data unauthenticated — run it on trusted LANs only.
+
+The bandwidth-utilization chart draws a dashed line at the 100% "dense ceiling"; bars
+past it (drawn amber) are Mixture-of-Experts / elastic models that stream only their
+active params, exactly as the report note describes.
+
+### Run the dashboard in Docker (benchmarks stay native)
+
+The dashboard is a read-only HTTP server, so it can run in a container while the
+**benchmarks keep running natively on the host** — which they must, since they need
+MLX/Metal on Apple Silicon (or the host GPU) and a host inference engine that a Linux
+container cannot reach. The split is:
+
+```
+native host:  ollama_bench.py  ──writes──▶  reports/  ◀──reads (read-only)──  Docker: dashboard
+```
+
+Start just the dashboard:
+
+```bash
+docker compose up -d --build
+```
+
+`docker-compose.yml` builds the dashboard image, publishes `8680`, and bind-mounts
+`./reports` read-only, so:
+
+- run `python3 scripts/ollama_bench.py …` on the host as usual (never in the container);
+- new reports land in `reports/` and appear in the dashboard on refresh — no restart,
+  because the mount is live and the server re-scans on every request;
+- `restart: unless-stopped` brings the dashboard back after a reboot.
+
+The container serves data unauthenticated; to expose it only to the host, change the
+port mapping to `"127.0.0.1:8680:8680"`. Stop it with `docker compose down`.
+
 ## Compare machines
 
 Script: `scripts/compare_latest_reports.py`
