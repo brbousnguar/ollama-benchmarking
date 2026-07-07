@@ -1,0 +1,19 @@
+[09:20:59] Serving 1 report(s) from C:\Users\brbousnguar\Projects\ollama-benchmarking\reports
+[09:20:59] Dashboard URLs:
+[09:20:59]   local:  http://localhost:8680
+[09:20:59]   LAN:    http://10.235.128.35:8680   <- open this on other devices
+[09:20:59] Press Ctrl+C to stop.
+[09:21:22] 127.0.0.1 "HEAD / HTTP/1.1" 200 -
+[09:21:45] 192.168.1.29 "HEAD / HTTP/1.1" 200 -
+[09:23:35] 127.0.0.1 "GET /api/runs HTTP/1.1" 200 -
+[09:23:35] 127.0.0.1 "GET /api/compare HTTP/1.1" 200 -
+[09:24:31] 127.0.0.1 "GET / HTTP/1.1" 200 -
+[09:24:31] 127.0.0.1 "GET /styles.css HTTP/1.1" 200 -
+[09:24:31] 127.0.0.1 "GET /app.js HTTP/1.1" 200 -
+[09:24:31] 127.0.0.1 "GET /api/runs HTTP/1.1" 200 -
+[09:24:32] 127.0.0.1 "GET /api/run?path=reports%2Follama-windows11-arc-63gb%2Follama-bench-20260706-084830.md HTTP/1.1" 200 -
+[09:25:12] 127.0.0.1 "GET / HTTP/1.1" 200 -
+[09:25:12] 127.0.0.1 "GET /styles.css HTTP/1.1" 200 -
+[09:25:12] 127.0.0.1 "GET /app.js HTTP/1.1" 200 -
+[09:25:13] 127.0.0.1 "GET /api/runs HTTP/1.1" 200 -
+[09:25:13] 127.0.0.1 "GET /api/run?path=reports%2Follama-windows11-arc-63gb%2Follama-bench-20260706-084830.md HTTP/1.1" 200 -
