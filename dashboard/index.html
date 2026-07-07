@@ -31,10 +31,13 @@
     </nav>
 
     <div class="topbar-right">
+      <button class="icon-toggle" id="kpi-guide" type="button" title="Open KPI guide" aria-label="Open KPI guide">i</button>
+      <button class="mini-toggle" id="kpi-toggle" type="button" aria-expanded="false" aria-controls="kpi-quick">KPI?</button>
       <span class="status" id="status"><span class="dot"></span><span id="status-text">connecting…</span></span>
       <button class="ghost-btn" id="refresh" title="Reload reports">↻</button>
     </div>
   </header>
+  <aside class="quick-kpi" id="kpi-quick" aria-label="Quick KPI intro" hidden></aside>
 
   <div class="app">
     <aside class="sidebar" id="sidebar">
@@ -52,6 +55,7 @@
     </aside>
 
     <main class="stage" id="stage">
+      <section class="view view-home" id="view-home" aria-label="KPI guide"></section>
       <section class="view view-run is-active" id="view-run" aria-label="Run detail"></section>
       <section class="view view-compare" id="view-compare" aria-label="Machine comparison"></section>
     </main>

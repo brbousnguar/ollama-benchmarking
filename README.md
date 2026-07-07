@@ -138,11 +138,22 @@ unless `--allow-non-windows` is passed.
 Script: `scripts/dashboard_server.py`
 
 The Markdown reports are ideal for version control but awkward to read and compare.
-The dashboard serves them as a modern web UI — a per-run view with hero KPI cards,
-animated bar charts (decode throughput, bandwidth utilization, throughput-per-GB,
-TTFT), a sortable summary table, and a cross-machine **Compare** view. It's standard
-library only (no install) and reads the existing `reports/` folder, so new benchmark
+The dashboard serves them as a modern web UI with primary **Run detail** and
+**Compare machines** views, a right-side KPI guide button, a quick `KPI?`
+reference toggle, a per-run view with hero KPI cards, animated bar charts
+(decode throughput, bandwidth utilization, throughput-per-GB, TTFT), a sortable
+summary table, and a cross-machine **Compare** view. Each hero KPI card includes
+an inline info toggle explaining what that metric measures. It's standard library
+only (no install) and reads the existing `reports/` folder, so new benchmark
 runs appear on refresh with no rebuild.
+
+The KPI guide explains how to read the report:
+
+- **Gen tok/s** for long-answer decode throughput.
+- **Prompt tok/s** for prefill speed on long prompts.
+- **TTFT** for first-token responsiveness.
+- **Eff BW** and **BW util %** for memory-bandwidth efficiency.
+- **Tok/s/GB** for throughput normalized by model footprint.
 
 ```bash
 python3 scripts/dashboard_server.py

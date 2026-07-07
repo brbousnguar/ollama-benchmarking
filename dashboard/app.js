@@ -14,9 +14,67 @@ const state = {
   colorByMachine: {},
   activePath: null,
   view: "run",
+  kpiQuickOpen: false,
   sort: { key: "gen_tps_mean", dir: -1 },
   sidebarSort: "date", // "date" | "machine"
   lastReport: null,
+};
+
+const KPI_INTRO = [
+  {
+    key: "Gen tok/s",
+    short: "Decode throughput",
+    text: "Generated tokens per second. This is the main speed number for long answers, coding output, and chat response flow.",
+  },
+  {
+    key: "Prompt tok/s",
+    short: "Prefill speed",
+    text: "Prompt tokens processed per second before generation starts. Higher helps with long prompts and retrieval-heavy workflows.",
+  },
+  {
+    key: "TTFT",
+    short: "First-token latency",
+    text: "Time to first token. Lower feels snappier, especially for interactive chat and short answers.",
+  },
+  {
+    key: "Eff BW",
+    short: "Estimated memory bandwidth",
+    text: "Model size multiplied by decode speed. It estimates how much memory bandwidth the run is extracting from the machine.",
+  },
+  {
+    key: "BW util %",
+    short: "Bandwidth efficiency",
+    text: "Effective bandwidth divided by theoretical memory bandwidth. Values above 100% usually indicate sparse or elastic models.",
+  },
+  {
+    key: "Tok/s/GB",
+    short: "Efficiency per footprint",
+    text: "Decode speed normalized by model size. Useful when comparing small and large models on value per resident GiB.",
+  },
+  {
+    key: "Wall s",
+    short: "Observed run time",
+    text: "Client-observed elapsed time for the request. This includes load, prompt processing, generation, and local overhead.",
+  },
+];
+
+const KPI_CARD_INFO = {
+  peakDecode: {
+    title: "Peak decode",
+    text: "Measures the highest mean generation throughput in this run. Use it to pick the fastest model for long answers and code generation.",
+  },
+  bandwidth: {
+    title: "Max BW utilization",
+    text: "Measures effective memory bandwidth divided by the machine's theoretical bandwidth. Above 100% usually means the model is sparse or elastic, so the dense-weight estimate overstates real bandwidth.",
+  },
+  perGb: {
+    title: "Best per-GB",
+    text: "Measures generated tokens per second per GiB of model footprint. Use it to compare efficiency across small and large models.",
+  },
+  ttft: {
+    title: "Fastest TTFT",
+    text: "Measures the lowest mean time to first token. Use it for interactive chat responsiveness and short-answer feel.",
+  },
 };
 
 /* --------------------------------------------------------------- helpers */
@@ -79,6 +137,7 @@ async function loadRuns() {
 
   document.getElementById("run-count").textContent = state.runs.length;
   renderSidebar();
+  renderHome();
   setStatus("is-live", `${state.runs.length} runs · ${machines.length} machines`);
 
   if (state.runs.length) {
@@ -89,6 +148,96 @@ async function loadRuns() {
       '<div class="empty"><div><div class="big">No reports found</div>' +
       'Run <code>python3 scripts/ollama_bench.py</code> to generate one.</div></div>';
   }
+}
+
+function renderHome() {
+  const view = document.getElementById("view-home");
+  if (!view) return;
+  const latest = state.runs[0];
+  view.innerHTML = "";
+
+  const heroStats = latest
+    ? [
+        chip("latest", shortTime(latest.started)),
+        chip("machine", latest.machine_label),
+        chip("models", String((latest.models || []).length)),
+      ]
+    : [chip("status", "waiting for reports")];
+
+  view.appendChild(el("div", { class: "landing-hero reveal" }, [
+    el("div", { class: "landing-copy" }, [
+      el("p", { class: "eyebrow" }, "Benchmark guide"),
+      el("h1", {}, ["Understand local LLM speed by ", el("span", {}, "how it feels"), " and how the hardware is used."]),
+      el("p", { class: "lead" },
+        "BenchLab reports focus on decode speed, first-token latency, and memory-bandwidth efficiency. Use these together: one model can be fastest at long generation while another feels better for short interactive prompts."
+      ),
+      el("div", { class: "chips landing-chips" }, heroStats),
+      el("div", { class: "landing-actions" }, [
+        el("button", { class: "primary-action", onclick: () => switchView("run") }, "Open latest run"),
+        el("button", { class: "secondary-action", onclick: () => toggleKpiQuick(true) }, "Show quick KPI intro"),
+      ]),
+    ]),
+    el("div", { class: "landing-panel" }, [
+      el("div", { class: "lp-head" }, [
+        el("span", {}, "Reading a run"),
+        el("strong", {}, "3 checks"),
+      ]),
+      el("ol", { class: "reading-steps" }, [
+        el("li", {}, [el("b", {}, "Start with Gen tok/s"), " for long-answer throughput."]),
+        el("li", {}, [el("b", {}, "Check TTFT"), " for interactive responsiveness."]),
+        el("li", {}, [el("b", {}, "Compare BW util and Tok/s/GB"), " to find efficient models for the machine."]),
+      ]),
+    ]),
+  ]));
+
+  view.appendChild(sectionLabel("KPI Reference", "what each number answers"));
+  const grid = el("div", { class: "kpi-guide-grid" });
+  for (const item of KPI_INTRO) {
+    grid.appendChild(el("article", { class: "kpi-guide-card reveal" }, [
+      el("div", { class: "kg-key" }, item.key),
+      el("h3", {}, item.short),
+      el("p", {}, item.text),
+    ]));
+  }
+  view.appendChild(grid);
+
+  view.appendChild(sectionLabel("Useful Reading Pattern"));
+  view.appendChild(el("div", { class: "guidance-strip reveal" }, [
+    el("div", {}, [el("b", {}, "Latency-sensitive"), el("span", {}, "Prioritize low TTFT and stable wall time.")]),
+    el("div", {}, [el("b", {}, "Batch or long output"), el("span", {}, "Prioritize Gen tok/s and p90 throughput.")]),
+    el("div", {}, [el("b", {}, "Hardware fit"), el("span", {}, "Use BW util and Tok/s/GB to spot models that use memory well.")]),
+  ]));
+}
+
+function renderKpiQuick() {
+  const panel = document.getElementById("kpi-quick");
+  panel.innerHTML = "";
+  panel.appendChild(el("div", { class: "qk-head" }, [
+    el("div", {}, [el("strong", {}, "KPI quick intro"), el("span", {}, "Keep this open while scanning charts.")]),
+    el("button", { class: "qk-close", onclick: () => toggleKpiQuick(false), "aria-label": "Close KPI quick intro" }, "x"),
+  ]));
+  const list = el("div", { class: "qk-list" });
+  for (const item of KPI_INTRO.slice(0, 6)) {
+    list.appendChild(el("div", { class: "qk-item" }, [
+      el("b", {}, item.key),
+      el("span", {}, item.short),
+    ]));
+  }
+  panel.appendChild(list);
+}
+
+function toggleKpiQuick(force) {
+  state.kpiQuickOpen = typeof force === "boolean" ? force : !state.kpiQuickOpen;
+  const panel = document.getElementById("kpi-quick");
+  const btn = document.getElementById("kpi-toggle");
+  if (state.kpiQuickOpen) {
+    renderKpiQuick();
+    panel.hidden = false;
+  } else {
+    panel.hidden = true;
+  }
+  btn.setAttribute("aria-expanded", String(state.kpiQuickOpen));
+  btn.classList.toggle("on", state.kpiQuickOpen);
 }
 
 /* --------------------------------------------------------------- sidebar */
@@ -234,23 +383,50 @@ function best(models, key, dir = 1) {
 function kpiCard(k, best, unit, opts = {}) {
   const c = opts.color || "var(--phosphor)";
   const glow = opts.glow || "rgba(166,255,63,0.18)";
+  const info = opts.info;
   return el("div", { class: "kpi reveal", style: `--kc:${glow};--kc-text:${c}` }, [
-    el("div", { class: "kpi-k" }, k),
+    el("div", { class: "kpi-top" }, [
+      el("div", { class: "kpi-k" }, k),
+      info ? el("button", {
+        class: "kpi-info",
+        type: "button",
+        title: `What ${info.title} measures`,
+        "aria-label": `What ${info.title} measures`,
+        "aria-expanded": "false",
+        onclick: (e) => toggleKpiCardInfo(e.currentTarget),
+      }, "i") : null,
+    ]),
     el("div", { class: "kpi-v" }, [best ? fmt(best.v, opts.d ?? 1) : "—", el("span", { class: "u" }, unit)]),
     el("div", { class: "kpi-sub" }, best ? (opts.subPrefix || "") + best.model : "no data"),
+    info ? el("div", { class: "kpi-info-panel", hidden: "" }, [
+      el("b", {}, info.title),
+      el("span", {}, info.text),
+    ]) : null,
   ]);
 }
+
+function toggleKpiCardInfo(btn) {
+  const card = btn.closest(".kpi");
+  const panel = card && card.querySelector(".kpi-info-panel");
+  if (!panel) return;
+  const open = panel.hidden;
+  panel.hidden = !open;
+  btn.setAttribute("aria-expanded", String(open));
+  btn.classList.toggle("on", open);
+}
+
 function kpiCards(models) {
   const grid = el("div", { class: "kpi-grid" });
-  grid.appendChild(kpiCard("Peak decode", best(models, "gen_tps_mean", 1), "tok/s", { d: 1 }));
+  grid.appendChild(kpiCard("Peak decode", best(models, "gen_tps_mean", 1), "tok/s", { d: 1, info: KPI_CARD_INFO.peakDecode }));
   const bw = best(models, "bw_util_mean", 1);
   grid.appendChild(kpiCard("Max BW utilization", bw, "%", {
     d: 1, color: bw && bw.v > 100 ? "var(--amber)" : "var(--phosphor)",
     glow: bw && bw.v > 100 ? "rgba(255,176,32,0.18)" : "rgba(166,255,63,0.18)",
     subPrefix: bw && bw.v > 100 ? "sparse · " : "",
+    info: KPI_CARD_INFO.bandwidth,
   }));
-  grid.appendChild(kpiCard("Best per-GB", best(models, "toks_per_gb_mean", 1), "t/s·GiB", { d: 2, color: "var(--cyan)", glow: "rgba(69,200,240,0.18)" }));
-  grid.appendChild(kpiCard("Fastest TTFT", best(models, "ttft_ms_mean", -1), "ms", { d: 0, color: "var(--amber)", glow: "rgba(255,176,32,0.16)" }));
+  grid.appendChild(kpiCard("Best per-GB", best(models, "toks_per_gb_mean", 1), "t/s·GiB", { d: 2, color: "var(--cyan)", glow: "rgba(69,200,240,0.18)", info: KPI_CARD_INFO.perGb }));
+  grid.appendChild(kpiCard("Fastest TTFT", best(models, "ttft_ms_mean", -1), "ms", { d: 0, color: "var(--amber)", glow: "rgba(255,176,32,0.16)", info: KPI_CARD_INFO.ttft }));
   return grid;
 }
 
@@ -418,9 +594,12 @@ function groupedPanel(reports, key, d) {
 function switchView(v) {
   state.view = v;
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("is-active", t.dataset.view === v));
+  document.getElementById("view-home").classList.toggle("is-active", v === "home");
   document.getElementById("view-run").classList.toggle("is-active", v === "run");
   document.getElementById("view-compare").classList.toggle("is-active", v === "compare");
+  document.getElementById("kpi-guide").classList.toggle("on", v === "home");
   if (v === "compare") renderCompare();
+  if (v === "home") renderHome();
 }
 
 document.getElementById("tabs").addEventListener("click", (e) => {
@@ -428,6 +607,8 @@ document.getElementById("tabs").addEventListener("click", (e) => {
   if (tab) switchView(tab.dataset.view);
 });
 document.getElementById("refresh").addEventListener("click", () => loadRuns().catch(showFatal));
+document.getElementById("kpi-guide").addEventListener("click", () => switchView("home"));
+document.getElementById("kpi-toggle").addEventListener("click", () => toggleKpiQuick());
 
 document.getElementById("sort-toggle").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-sort]");
@@ -440,4 +621,5 @@ document.getElementById("sort-toggle").addEventListener("click", (e) => {
 
 function showFatal(e) { setStatus("is-error", "error: " + e.message); }
 
+renderHome();
 loadRuns().catch(showFatal);
